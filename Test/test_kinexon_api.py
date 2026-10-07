@@ -166,8 +166,8 @@ def main():
     parser.add_argument(
         "--team-id",
         type=int,
-        default=1,
-        help="Team ID to use for the sample /teams/{id}/players call (default: 1)",
+        default=3,
+        help="Team ID to use for the sample /teams/{id}/players call (default: 3)",
     )
     parser.add_argument(
         "--debug",

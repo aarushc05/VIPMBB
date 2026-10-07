@@ -1,0 +1,17 @@
+{
+  "name": "vipmbb",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:offline": "node scripts/dev.mjs --offline",
+    "setup:models": "node scripts/setup-models.mjs",
+    "dev:legacy": "node scripts/dev-legacy.mjs --offline",
+    "build": "npm --prefix web run build",
+    "test": "node scripts/check.mjs",
+    "sync": ".venv/bin/python -m local_app.sync"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}
