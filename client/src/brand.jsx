@@ -106,8 +106,8 @@ export function WorkflowLinks({ navigate }) {
         {
           step: "01",
           icon: ClipboardList,
-          title: "Review the session",
-          detail: "Coverage first. Workload in context.",
+          title: "Explore the session",
+          detail: "Player workload. Recent practice trends.",
           action: openLibrary,
         },
         {

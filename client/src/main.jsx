@@ -53,7 +53,6 @@ import {
   dateRange,
   jobDateRange,
   number,
-  percentage,
   sessionLabels,
   sortRows,
   timestampLabel,
@@ -63,6 +62,8 @@ import {
 import "./styles.css";
 import { attachMotion } from "./motion.js";
 import { PracticeHero, WorkflowLinks } from "./brand.jsx";
+import { activityLabel } from "./activity.js";
+import { PracticeTrends } from "./practice-trends.jsx";
 
 const NAV = [
   { key: "practices", label: "Practice reports", icon: ClipboardList },
@@ -140,17 +141,10 @@ function Classification({ session }) {
   return (
     <Badge
       tone={
-        session?.reviewed
-          ? kind === "practice"
-            ? "green"
-            : kind === "game"
-              ? "blue"
-              : "neutral"
-          : "amber"
+        kind === "practice" ? "green" : kind === "game" ? "blue" : "neutral"
       }
     >
-      {session?.reviewed ? "Reviewed" : "Unreviewed"} ·{" "}
-      {kind === "unknown" ? "Activity unknown" : kind}
+      {activityLabel(session)}
     </Badge>
   );
 }
@@ -535,9 +529,8 @@ function Practices({ status, navigate }) {
         <div>
           <span className="gold-line" />
           <span>
-            <strong>Practice reports start with good context.</strong> Source
-            labels are not verification. Review activity type before using
-            sessions in practice comparisons.
+            <strong>Workload, with the right comparison.</strong> Explore each
+            player’s recent practices. Games and mixed recordings stay separate.
           </span>
         </div>
         <a href="#knowledge">
@@ -617,8 +610,8 @@ function Practices({ status, navigate }) {
               >
                 <option value="">All activity</option>
                 <option value="practice">Practice</option>
-                <option value="game">Game</option>
-                <option value="unknown">Unknown</option>
+                <option value="game">Game / scrimmage</option>
+                <option value="unknown">Mixed / unlabeled</option>
               </select>
               <ChevronDown size={13} />
             </label>
@@ -693,7 +686,7 @@ function Practices({ status, navigate }) {
                 <thead>
                   <tr>
                     <th>Session</th>
-                    <th>Activity review</th>
+                    <th>Activity</th>
                     <th>Source label</th>
                     <th className="numeric">Players with data</th>
                     <th>Report</th>
@@ -868,15 +861,19 @@ function Report({ id, navigate, onChange }) {
   const [action, setAction] = useState("");
   const [actionError, setActionError] = useState("");
   const [notice, setNotice] = useState("");
-  const [reviewOpen, setReviewOpen] = useState(false);
+  const correctionRef = useRef(null);
   const [classification, setClassification] = useState("practice");
   const [reason, setReason] = useState("");
   useEffect(() => {
     setGroup("workload");
     setPlayerSearch("");
-    setReviewOpen(false);
+    if (correctionRef.current) correctionRef.current.open = false;
     setNotice("");
   }, [id]);
+  useEffect(() => {
+    setClassification(report?.session?.classification || "unknown");
+    setReason("");
+  }, [report?.session?.classification, id]);
   const perform = async (kind, operation) => {
     setAction(kind);
     setActionError("");
@@ -887,10 +884,10 @@ function Report({ id, navigate, onChange }) {
       onChange();
       setNotice(
         kind === "review"
-          ? "Activity review saved. Coverage has not been changed."
+          ? "Activity label corrected. Measurements and coverage have not changed."
           : "Report checked against the latest source data. An unchanged report keeps its version.",
       );
-      setReviewOpen(false);
+      if (correctionRef.current) correctionRef.current.open = false;
     } catch (e) {
       setActionError(e.message);
     } finally {
@@ -975,20 +972,14 @@ function Report({ id, navigate, onChange }) {
             : "Coverage needs attention"}
         </Badge>
         <span>Source: {sessionLabels(session.source_labels)}</span>
-        <button
-          className="text-button"
-          onClick={() => {
-            setReviewOpen(!reviewOpen);
-            setClassification(session.classification || "unknown");
-          }}
-        >
-          Review activity type
-          <ChevronDown size={13} />
-        </button>
       </div>
       {actionError && <Banner tone="error">{actionError}</Banner>}
       {notice && <Banner tone="success">{notice}</Banner>}
-      {reviewOpen && (
+      <details ref={correctionRef} className="activity-correction">
+        <summary>
+          Correct an activity label
+          <ChevronDown size={13} />
+        </summary>
         <form
           className="review-form panel"
           onSubmit={(e) => {
@@ -999,10 +990,10 @@ function Report({ id, navigate, onChange }) {
           }}
         >
           <div>
-            <h3>Confirm the activity—not its completeness</h3>
+            <h3>Correct the source label</h3>
             <p>
-              Only mark an activity when you know what this recording contains.
-              Mixed or uncertain sessions should remain unknown.
+              Use this only when a recording is mislabeled. This does not change
+              measurements or participant coverage.
             </p>
           </div>
           <label>
@@ -1013,16 +1004,16 @@ function Report({ id, navigate, onChange }) {
             >
               <option value="practice">Practice</option>
               <option value="game">Game</option>
-              <option value="unknown">Unknown / mixed</option>
+              <option value="unknown">Mixed / unlabeled</option>
             </select>
           </label>
           <label className="review-reason">
-            Review note
+            Correction note
             <input
               required
               minLength={3}
               maxLength={1000}
-              placeholder="How did you verify this activity?"
+              placeholder="Why is the source label incorrect?"
               value={reason}
               onChange={(e) => setReason(e.target.value)}
             />
@@ -1031,7 +1022,9 @@ function Report({ id, navigate, onChange }) {
             <button
               type="button"
               className="button quiet"
-              onClick={() => setReviewOpen(false)}
+              onClick={() => {
+                if (correctionRef.current) correctionRef.current.open = false;
+              }}
             >
               Cancel
             </button>
@@ -1044,25 +1037,17 @@ function Report({ id, navigate, onChange }) {
               ) : (
                 <>
                   <Check size={16} />
-                  Save review
+                  Save correction
                 </>
               )}
             </button>
           </div>
         </form>
-      )}
-      {(report.warnings?.length > 0 || coverage.notes?.length > 0) && (
-        <Banner
-          tone="warning"
-          title="Read this report with its coverage in mind"
-        >
+      </details>
+      {report.warnings?.length > 0 && (
+        <Banner tone="warning" title="Data notes">
           <ul>
-            {[
-              ...new Set([
-                ...(report.warnings || []),
-                ...(coverage.notes || []),
-              ]),
-            ].map((warning, i) => (
+            {[...new Set([...(report.warnings || [])])].map((warning, i) => (
               <li key={i}>
                 {typeof warning === "string"
                   ? warning
@@ -1153,11 +1138,11 @@ function Report({ id, navigate, onChange }) {
               <dd>{timestampLabel(session.updated_at)}</dd>
             </div>
             <div>
-              <dt>Activity type</dt>
+              <dt>Activity label</dt>
               <dd>
-                {session.reviewed
-                  ? "Reviewed by a user"
-                  : "Not independently reviewed"}
+                {session.classification_origin === "manual" || session.reviewed
+                  ? "Staff correction"
+                  : "Kinexon source label"}
               </dd>
             </div>
             <div>
@@ -1170,7 +1155,11 @@ function Report({ id, navigate, onChange }) {
             </div>
             <div>
               <dt>Comparison baseline</dt>
-              <dd>Earlier reviewed practices only</dd>
+              <dd>
+                {session.classification === "practice"
+                  ? "Recent comparable practices · 90-day window"
+                  : "Not included in practice comparisons"}
+              </dd>
             </div>
           </dl>
           <div className="panel-action">
@@ -1334,87 +1323,36 @@ function Report({ id, navigate, onChange }) {
           arbitrary units. Comparisons require consistent metric definitions.
         </div>
       </Panel>
-      <div className="report-two-column">
-        <Panel
-          title="Individual context"
-          description={
-            session.classification === "practice"
-              ? "Load per minute against each player’s earlier reviewed practices."
-              : "Practice-to-practice comparison is unavailable for this activity type."
-          }
-        >
-          {report.players?.some(
-            (player) => player.baseline?.sample_count > 0,
-          ) ? (
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Player</th>
-                    <th className="numeric">Prior practices</th>
-                    <th className="numeric">Baseline AU/min</th>
-                    <th className="numeric">Change</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {report.players.map((player) => (
-                    <tr key={player.id}>
-                      <td>{player.name}</td>
-                      <td className="numeric">
-                        {number(player.baseline?.sample_count)}
-                      </td>
-                      <td className="numeric">
-                        {number(player.baseline?.load_per_minute, 2)}
-                      </td>
-                      <td className="numeric">
-                        {percentage(player.baseline?.change_pct)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <Empty
-              title={
-                session.classification === "practice"
-                  ? "No eligible baseline yet"
-                  : "Practice comparison unavailable"
-              }
-              icon={BarChart3}
-            >
-              <p>
-                {session.classification === "practice"
-                  ? "Comparisons need earlier reviewed practices with usable exposure and workload. Current and future sessions are excluded."
-                  : "Only recordings classified as practice are eligible for practice baselines. Games, mixed activity and unknown recordings are not compared with practice workloads."}
-              </p>
-            </Empty>
-          )}
-          <div className="table-footnote">
-            A change is descriptive—not a fatigue, readiness or effort
-            diagnosis.
-          </div>
-        </Panel>
-        <Panel
-          title="Drill breakdown"
-          description="Recorded phases and available player measurements."
-        >
-          {report.drills?.length ? (
-            <DrillBreakdown
-              drills={report.drills}
-              players={report.players || []}
-            />
-          ) : (
-            <Empty title="No drill-level data imported" icon={Activity}>
-              <p>
-                This does not mean the practice had no drills. Phase metadata
-                and player-phase measurements must be available before drill
-                analysis can be shown.
-              </p>
-            </Empty>
-          )}
-        </Panel>
-      </div>
+      {session.classification === "practice" ? (
+        <PracticeTrends key={id} report={report} />
+      ) : (
+        <div className="inline-note activity-comparison-note">
+          <Info size={16} />
+          <p>
+            {activityLabel(session)} data stays separate from practice trends.
+            Open a practice report to compare recent practice workloads.
+          </p>
+        </div>
+      )}
+      <Panel
+        title="Drill breakdown"
+        description="Recorded phases and available player measurements."
+      >
+        {report.drills?.length ? (
+          <DrillBreakdown
+            drills={report.drills}
+            players={report.players || []}
+          />
+        ) : (
+          <Empty title="No drill-level data imported" icon={Activity}>
+            <p>
+              This does not mean the practice had no drills. Phase metadata and
+              player-phase measurements must be available before drill analysis
+              can be shown.
+            </p>
+          </Empty>
+        )}
+      </Panel>
       {report.definitions?.length > 0 && (
         <details className="panel definitions-panel">
           <summary>
@@ -1450,7 +1388,7 @@ function Report({ id, navigate, onChange }) {
         <details className="panel definitions-panel">
           <summary>
             <ShieldCheck size={17} />
-            Activity review history
+            Activity label history
             <ChevronDown size={16} />
           </summary>
           <div className="review-history">
