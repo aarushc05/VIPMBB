@@ -1,12 +1,10 @@
 """Local, provenance-preserving retrieval. Coach notes are data, never instructions."""
 from __future__ import annotations
 
-from contextlib import closing
-from datetime import datetime, timezone
 import hashlib
-import json
 import math
 import re
+import httpx
 
 from . import data, models
 
@@ -23,92 +21,114 @@ SEEDS = [
 ]
 
 
-def now():
-    return datetime.now(timezone.utc).isoformat()
-
 
 def initialize():
-    with closing(data.connect()) as conn, conn:
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS documents (
-          id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,
-          kind TEXT NOT NULL, updated_at TEXT NOT NULL, content_hash TEXT NOT NULL,
-          embedding_json TEXT, embedding_model TEXT);
-        CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(title,body,content='documents',content_rowid='id');
-        CREATE TABLE IF NOT EXISTS chat_messages (
-          id INTEGER PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL,
-          content TEXT NOT NULL, response_json TEXT, created_at TEXT NOT NULL);
-        CREATE INDEX IF NOT EXISTS chat_conversation ON chat_messages(conversation_id,id);
-        """)
+    """Seed definitions after migrations; no startup DDL or global FTS rebuild."""
+    with data.database() as conn:
         for title, kind, body in SEEDS:
-            row = conn.execute("SELECT id,content_hash FROM documents WHERE title=? AND kind=?", (title, kind)).fetchone()
             digest = hashlib.sha256(body.encode()).hexdigest()
-            if not row:
-                conn.execute("INSERT INTO documents(title,body,kind,updated_at,content_hash) VALUES(?,?,?,?,?)", (title,body,kind,now(),digest))
-            elif row["content_hash"] != digest:
-                conn.execute("UPDATE documents SET body=?,updated_at=?,content_hash=?,embedding_json=NULL,embedding_model=NULL WHERE id=?",(body,now(),digest,row["id"]))
-        conn.execute("INSERT INTO documents_fts(documents_fts) VALUES('rebuild')")
+            conn.execute("""INSERT INTO documents(title,body,kind,content_hash,owner_id)
+                VALUES(%s,%s,%s,%s,NULL)
+                ON CONFLICT(title,kind) WHERE kind<>'coach_note' DO UPDATE
+                SET body=EXCLUDED.body,updated_at=now(),content_hash=EXCLUDED.content_hash,
+                    embedding_json=NULL,embedding_model=NULL,embedding=NULL,embedding_dimensions=NULL
+                WHERE documents.content_hash<>EXCLUDED.content_hash""", (title,body,kind,digest))
 
 
-def list_documents():
-    with closing(data.connect()) as conn:
-        return {"documents":[dict(r) for r in conn.execute("SELECT id,title,body,kind,updated_at FROM documents ORDER BY kind,title")]}
+def list_documents(owner_id="local"):
+    with data.database() as conn:
+        rows=conn.execute("""SELECT id,title,body,kind,updated_at FROM documents
+            WHERE owner_id IS NULL OR owner_id=%s ORDER BY kind,title COLLATE "C" """, (owner_id,)).fetchall()
+        return {"documents":data.public_value(rows)}
 
 
-def add_note(title, body):
+def add_note(title, body, owner_id="local"):
     title, body = title.strip(), body.strip()
     if not title or not body or len(title)>160 or len(body)>12000:
         raise ValueError("A note needs a title (up to 160 characters) and body (up to 12,000 characters).")
-    with closing(data.connect()) as conn, conn:
-        cursor=conn.execute("INSERT INTO documents(title,body,kind,updated_at,content_hash) VALUES(?,?,?,?,?)",
-                            (title,body,"coach_note",now(),hashlib.sha256(body.encode()).hexdigest()))
-        identifier=cursor.lastrowid
-        conn.execute("INSERT INTO documents_fts(rowid,title,body) VALUES(?,?,?)", (identifier,title,body))
-        return dict(conn.execute("SELECT id,title,body,kind,updated_at FROM documents WHERE id=?",(identifier,)).fetchone())
+    with data.database() as conn:
+        row=conn.execute("""INSERT INTO documents(title,body,kind,content_hash,owner_id)
+            VALUES(%s,%s,'coach_note',%s,%s) RETURNING id,title,body,kind,updated_at""",
+            (title,body,hashlib.sha256(body.encode()).hexdigest(),owner_id)).fetchone()
+        return data.public_value(row)
+
+
+def vector_literal(vector):
+    if not isinstance(vector, (list,tuple)) or not 1 <= len(vector) <= 16000:
+        raise ValueError("Invalid embedding dimensions.")
+    if not all(isinstance(n,(float,int)) and not isinstance(n,bool) and math.isfinite(n) for n in vector):
+        raise ValueError("Invalid embedding values.")
+    if not any(n != 0 for n in vector):
+        raise ValueError("Zero-norm embeddings cannot be used for cosine retrieval.")
+    return "["+",".join(str(float(n)) for n in vector)+"]"
 
 
 def index_documents():
-    with closing(data.connect()) as conn:
-        rows=[dict(r) for r in conn.execute("SELECT * FROM documents WHERE embedding_json IS NULL OR embedding_model!=?",(models.EMBED_MODEL,))]
+    with data.database() as conn:
+        rows=conn.execute("""SELECT * FROM documents
+            WHERE embedding IS NULL OR embedding_model IS DISTINCT FROM %s ORDER BY id""",
+            (models.EMBED_MODEL,)).fetchall()
+        known=conn.execute("""SELECT DISTINCT embedding_dimensions AS dimensions FROM documents
+            WHERE embedding IS NOT NULL AND embedding_model=%s""", (models.EMBED_MODEL,)).fetchall()
+    dimensions={r["dimensions"] for r in known}
+    if len(dimensions)>1:
+        raise ValueError("Stored embedding dimensions disagree; reindex this model.")
+    expected=next(iter(dimensions),None)
     count=0
     for start in range(0,len(rows),8):
         batch=rows[start:start+8]
         vectors=models.embed([r["title"]+"\n"+r["body"] for r in batch])
-        with closing(data.connect()) as conn, conn:
-            for row,vector in zip(batch,vectors):
-                if not vector or not all(isinstance(n,(float,int)) and math.isfinite(n) for n in vector):
-                    raise ValueError("Invalid embedding result")
-                conn.execute("UPDATE documents SET embedding_json=?,embedding_model=? WHERE id=? AND content_hash=?",
-                             (json.dumps(vector),models.EMBED_MODEL,row["id"],row["content_hash"]))
-                count+=1
-    return {"indexed":count,"model":models.EMBED_MODEL}
+        if len(vectors)!=len(batch):
+            raise ValueError("Embedding response did not cover every document.")
+        literals=[vector_literal(vector) for vector in vectors]
+        sizes={len(vector) for vector in vectors}
+        if len(sizes)!=1 or (expected is not None and sizes!={expected}):
+            raise ValueError("Embedding dimensions do not match the selected model.")
+        expected=next(iter(sizes))
+        with data.database() as conn:
+            for row,vector,literal in zip(batch,vectors,literals):
+                changed=conn.execute("""UPDATE documents SET embedding_json=%s,embedding_model=%s,
+                    embedding=%s::public.vector,embedding_dimensions=%s WHERE id=%s AND content_hash=%s""",
+                    (data.jsonb(vector),models.EMBED_MODEL,literal,len(vector),row["id"],row["content_hash"])).rowcount
+                count+=changed
+    return {"indexed":count,"model":models.EMBED_MODEL,"dimensions":expected}
 
 
-def retrieve(query, limit=4, kind=None):
-    tokens=[t for t in re.findall(r"[a-zA-Z0-9]+",query.lower()) if len(t)>2]
-    lexical={}
-    with closing(data.connect()) as conn:
+def retrieve(query, limit=4, kind=None, owner_id="local"):
+    if not isinstance(limit,int) or not 1<=limit<=100:
+        raise ValueError("Retrieval limit must be between 1 and 100.")
+    tokens=[t for t in re.findall(r"[a-zA-Z0-9]+",query.lower()) if len(t)>2][:30]
+    scores={}
+    with data.database() as conn:
         if tokens:
-            match=" OR ".join('"'+t+'"' for t in tokens[:30])
-            for rank,row in enumerate(conn.execute("SELECT d.id AS rowid FROM documents_fts JOIN documents d ON d.id=documents_fts.rowid WHERE documents_fts MATCH ? AND (? IS NULL OR d.kind=?) ORDER BY bm25(documents_fts) LIMIT 12",(match,kind,kind))):
-                lexical[row["rowid"]]=1/(rank+1)
-        rows=[dict(r) for r in conn.execute("SELECT * FROM documents WHERE (? IS NULL OR kind=?)", (kind, kind))]
-    vector=None
-    if any(r["embedding_json"] and r["embedding_model"]==models.EMBED_MODEL for r in rows) and not models.disabled():
+            rows=conn.execute("""SELECT id,ts_rank_cd(search_vector,to_tsquery('english',%s)) AS rank
+                FROM documents WHERE search_vector @@ to_tsquery('english',%s)
+                AND (%s::text IS NULL OR kind=%s) AND (owner_id IS NULL OR owner_id=%s)
+                ORDER BY rank DESC,id LIMIT 12""", (" | ".join(tokens)," | ".join(tokens),kind,kind,owner_id)).fetchall()
+            scores={row["id"]:1/(rank+1) for rank,row in enumerate(rows)}
+        indexed=conn.execute("""SELECT id FROM documents WHERE embedding IS NOT NULL
+            AND embedding_model=%s AND (%s::text IS NULL OR kind=%s)
+            AND (owner_id IS NULL OR owner_id=%s) LIMIT 1""", (models.EMBED_MODEL,kind,kind,owner_id)).fetchone()
+    if indexed and not models.disabled():
         try:
             vector=models.embed([query])[0]
-        except Exception:
-            pass  # Lexical fallback is complete and explicitly surfaced by model status.
-    scored=[]
-    for row in rows:
-        score=lexical.get(row["id"],0)
-        if vector is not None and row["embedding_json"] and row["embedding_model"]==models.EMBED_MODEL:
-            stored=json.loads(row["embedding_json"])
-            if len(stored)==len(vector):
-                similarity=sum(a*b for a,b in zip(vector,stored))
-                if similarity>0.25:
-                    score+=similarity
-        if score>0:
-            scored.append((score,row))
-    scored.sort(key=lambda x:(-x[0],x[1]["id"]))
-    return [{k:r[k] for k in ("id","title","body","kind","updated_at")} for _,r in scored[:limit]]
+            literal=vector_literal(vector)
+            with data.database() as conn:
+                rows=conn.execute("""SELECT id,1-(embedding <=> %s::public.vector) AS similarity
+                    FROM documents WHERE embedding IS NOT NULL AND embedding_model=%s
+                    AND embedding_dimensions=%s AND (%s::text IS NULL OR kind=%s)
+                    AND (owner_id IS NULL OR owner_id=%s)
+                    ORDER BY embedding <=> %s::public.vector,id LIMIT 12""",
+                    (literal,models.EMBED_MODEL,len(vector),kind,kind,owner_id,literal)).fetchall()
+                for row in rows:
+                    if row["similarity"]>0.25:
+                        scores[row["id"]]=scores.get(row["id"],0)+row["similarity"]
+        except (ValueError, RuntimeError, IndexError, KeyError, httpx.HTTPError):
+            pass  # Invalid/offline model keeps a complete lexical fallback.
+    if not scores:
+        return []
+    with data.database() as conn:
+        rows=conn.execute("""SELECT id,title,body,kind,updated_at FROM documents
+            WHERE id=ANY(%s) AND (owner_id IS NULL OR owner_id=%s)""", (list(scores),owner_id)).fetchall()
+    rows.sort(key=lambda row:(-scores[row["id"]],row["id"]))
+    return data.public_value(rows[:limit])

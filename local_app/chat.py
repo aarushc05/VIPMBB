@@ -34,18 +34,18 @@ def today():
     return datetime.now(data.ATLANTA).date()
 
 
-def get_history(conversation_id):
+def get_history(conversation_id, owner_id="local"):
     if not conversation_id:
         return {"messages": []}
     with data.database() as conn:
-        rows = conn.execute("SELECT role,content,response_json,created_at FROM chat_messages WHERE conversation_id=? ORDER BY id", (conversation_id,)).fetchall()
-    return {"messages": [{"role": r["role"], "content": r["content"], "created_at": r["created_at"],
-                          "response": json.loads(r["response_json"]) if r["response_json"] else None} for r in rows]}
+        rows = conn.execute("SELECT role,content,response_json,created_at FROM chat_messages WHERE conversation_id=%s AND owner_id=%s ORDER BY id", (conversation_id, owner_id)).fetchall()
+    return {"messages": [{"role": r["role"], "content": r["content"], "created_at": data.iso(r["created_at"]),
+                          "response": data.json_value(r["response_json"]) if r["response_json"] else None} for r in rows]}
 
 
-def clear_history(conversation_id):
+def clear_history(conversation_id, owner_id="local"):
     with data.database() as conn:
-        conn.execute("DELETE FROM chat_messages WHERE conversation_id=?", (conversation_id,))
+        conn.execute("DELETE FROM chat_messages WHERE conversation_id=%s AND owner_id=%s", (conversation_id, owner_id))
     return {"cleared": True}
 
 
@@ -230,23 +230,23 @@ def _plan(message, players, history):
 def _select_sessions(plan, session_id):
     with data.database() as conn:
         if session_id is not None and not plan["start"] and not plan["end"] and plan["last_n"] == 1:
-            rows = conn.execute("SELECT * FROM sessions WHERE id=? AND removed_upstream=0", (session_id,)).fetchall()
+            rows = conn.execute("SELECT * FROM sessions WHERE id=%s AND NOT removed_upstream", (session_id,)).fetchall()
         else:
-            clauses = ["s.removed_upstream=0", "s.classification='practice'"]
+            clauses = ["NOT s.removed_upstream", "s.classification='practice'"]
             values = []
             if plan["start"]:
-                clauses.append("s.local_date>=?"); values.append(plan["start"])
+                clauses.append("s.local_date>=%s"); values.append(plan["start"])
             if plan["end"]:
-                clauses.append("s.local_date<=?"); values.append(plan["end"])
+                clauses.append("s.local_date<=%s"); values.append(plan["end"])
             # Don't select a future scheduled recording as the latest observed practice.
-            clauses.append("s.local_date<=?"); values.append(today().isoformat())
+            clauses.append("s.local_date<=%s"); values.append(today().isoformat())
             if not plan["start"] and not plan["end"]:
                 clauses.append("EXISTS(SELECT 1 FROM stats t WHERE t.session_id=s.id)")
             sql = "SELECT s.* FROM sessions s WHERE " + " AND ".join(clauses) + " ORDER BY s.start_utc DESC,s.id DESC"
             if not plan["start"] and not plan["end"]:
-                sql += " LIMIT ?"; values.append(plan["last_n"])
+                sql += " LIMIT %s"; values.append(plan["last_n"])
             rows = conn.execute(sql, values).fetchall()
-    return [dict(r) for r in rows]
+    return [data.public_value(dict(r)) for r in rows]
 
 
 def _aggregate(records, metric):
@@ -266,17 +266,17 @@ def _aggregate(records, metric):
 def _facts(plan, sessions, player_ids):
     identifiers = [s["id"] for s in sessions]
     with data.database() as conn:
-        sql = "SELECT t.*,p.name FROM stats t JOIN players p ON p.id=t.player_id WHERE t.session_id IN (" + ",".join("?" for _ in identifiers) + ")"
+        sql = "SELECT t.*,p.name FROM stats t JOIN players p ON p.id=t.player_id WHERE t.session_id IN (" + ",".join("%s" for _ in identifiers) + ")"
         values = list(identifiers)
         if player_ids:
-            sql += " AND t.player_id IN (" + ",".join("?" for _ in player_ids) + ")"; values.extend(player_ids)
+            sql += " AND t.player_id IN (" + ",".join("%s" for _ in player_ids) + ")"; values.extend(player_ids)
         records = [dict(r) for r in conn.execute(sql, values)]
         assignment_sql = ("SELECT a.session_id,a.player_id,t.player_id AS recorded_player_id FROM assignments a "
                           "LEFT JOIN stats t ON t.session_id=a.session_id AND t.player_id=a.player_id "
-                          "WHERE a.session_id IN (" + ",".join("?" for _ in identifiers) + ")")
+                          "WHERE a.session_id IN (" + ",".join("%s" for _ in identifiers) + ")")
         assignment_values = list(identifiers)
         if player_ids:
-            assignment_sql += " AND a.player_id IN (" + ",".join("?" for _ in player_ids) + ")"
+            assignment_sql += " AND a.player_id IN (" + ",".join("%s" for _ in player_ids) + ")"
             assignment_values.extend(player_ids)
         assigned = [dict(row) for row in conn.execute(assignment_sql, assignment_values)]
     metric = plan["metric"]
@@ -301,7 +301,7 @@ def _facts(plan, sessions, player_ids):
         warnings.append(f"Missing assigned-player measurements: {len(missing_assignments)} player-session record(s) are unavailable within the selected players and dates; "
                         + "; ".join(details) + ". Rankings and totals use available records only. A missing record does not establish absence, inactivity, or zero workload.")
     for (player_id, session_id), group in groups.items():
-        value, known, warning = _aggregate([json.loads(r["metrics_json"]) for r in group], metric)
+        value, known, warning = _aggregate([data.json_value(r["metrics_json"]) for r in group], metric)
         if warning:
             warnings.append(warning)
         row = {"player_id": player_id, "player": group[0]["name"], "value": value,
@@ -460,6 +460,6 @@ def answer(message, session_id=None, conversation_id=None):
                         result["warnings"].append("No calendar range requested: showing the selected recording or most recent recorded practices, which may be historical.")
     result["warnings"] = list(dict.fromkeys(result["warnings"]))
     with data.database() as conn:
-        conn.execute("INSERT INTO chat_messages(conversation_id,role,content,created_at) VALUES (?,'user',?,?)", (conversation_id, message, data.utcnow()))
-        conn.execute("INSERT INTO chat_messages(conversation_id,role,content,response_json,created_at) VALUES (?,'assistant',?,?,?)", (conversation_id, result["answer"], data.canonical(result), data.utcnow()))
+        conn.execute("INSERT INTO chat_messages(conversation_id,role,content,created_at) VALUES (%s,'user',%s,%s)", (conversation_id, message, data.utcnow()))
+        conn.execute("INSERT INTO chat_messages(conversation_id,role,content,response_json,created_at) VALUES (%s,'assistant',%s,%s,%s)", (conversation_id, result["answer"], data.jsonb(result), data.utcnow()))
     return result

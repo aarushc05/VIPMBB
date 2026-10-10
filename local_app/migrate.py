@@ -5,7 +5,7 @@ from alembic import command
 from alembic.config import Config
 from . import db
 
-HEAD = '0001_postgres'
+HEAD = '0002_unknown_timestamps'
 
 def upgrade():
     path = Path(__file__).resolve().parents[1] / 'server' / 'alembic.ini'
