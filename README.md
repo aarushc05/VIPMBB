@@ -4,6 +4,10 @@ Local practice reports and a source-backed performance assistant for Georgia Tec
 
 **New to the project? Start with the fictional-data demo below.** You can explore reports, date ranges, classifications, and supported assistant queries without access to private team data. For development and pull requests, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+![GT-inspired navy and gold practice workspace, shown with fictional demo data](docs/images/demo-preview.jpg)
+
+The interface uses Georgia Tech-inspired navy and gold, an original court illustration, responsive navigation, and progressive scroll reveals. Motion respects reduced-motion preferences, keyboard navigation remains available, and the complete print report uses a paper-friendly layout. The preview above contains no real athlete data. This is a student project, not an official Georgia Tech product.
+
 ## Start on your laptop
 
 Tested on an Apple M4 Mac with 16 GB RAM. You need:
@@ -174,3 +178,12 @@ The application is private by default, not encrypted by itself. Use FileVault an
 This is a student analysis project, not an official Georgia Tech product. Institutional names, colors, and marks remain their owners' property. Public source code does not authorize access to team records or redistribution of source data. A software license still needs to be selected by the repository owner before the project can claim to be generally licensed open-source software.
 
 Contributions should use the demo and synthetic tests. High-value next steps include coach-validated report definitions, more transparent source coverage and sync recovery, reviewed practice/game boundaries, and a regression question set for the assistant. Approved sharing, authentication, and backup operations should precede any hosted team deployment.
+
+### Recommended next milestone: a coach-reviewed practice brief
+
+1. **Review inbox:** combine questionable practice/game classifications, missing assigned-player records, and uncertain recording boundaries. Import season-specific schedules as supporting evidence, never as automatic proof of game minutes.
+2. **Draft → ready → approved reports:** make coverage and freshness explicit before a coach approves a brief. Attach dated coaching observations and preserve the approved version when later source corrections arrive.
+3. **Player timelines:** compare exposure and intensity across reviewed, comparable practices. Show sample sizes, missing days, and source reports; do not pool games, unmatched denominators, or unrelated drills into a single baseline.
+4. **Assistant evaluation:** maintain a coach-authored question set covering exact values, date/activity scope, missing data, ambiguous names, and citation accuracy. Expand supported analysis only with deterministic calculations and regression cases.
+
+Before team-wide hosting, add identity, role-based access, audit attribution, and a tested encrypted backup/restore process. Before general software reuse, the repository owner should select a license and clarify applicable data and branding permissions.
