@@ -1,9 +1,11 @@
 """Numerical and provenance regressions using tiny, inspectable datasets."""
+
 import pytest
 
 
 def report(session_id):
-    from local_app.analytics import get_report
+    from server.app.analytics import get_report
+
     return get_report(session_id)
 
 
@@ -60,9 +62,16 @@ def test_inactive_historical_player_is_not_removed_from_report(seed):
 
 
 def test_human_classification_does_not_claim_complete_data(seed):
-    from local_app.data import review_session
+    from server.app.data import review_session
+
     seed.player(11, "Alex Rivera")
-    seed.session(101, classification="unknown", reviewed=False, expected_players=2, status="partial")
+    seed.session(
+        101,
+        classification="unknown",
+        reviewed=False,
+        expected_players=2,
+        status="partial",
+    )
     seed.stats(101, 11)
     review_session(101, "practice", "Staff confirmed this was practice")
     result = report(101)
@@ -72,7 +81,8 @@ def test_human_classification_does_not_claim_complete_data(seed):
 
 
 def test_report_generation_is_idempotent_and_source_change_revises(practice, seed):
-    from local_app.data import regenerate_report
+    from server.app.data import regenerate_report
+
     first = report(practice)
     again = report(practice)
     manual = regenerate_report(practice)
@@ -84,7 +94,8 @@ def test_report_generation_is_idempotent_and_source_change_revises(practice, see
 
 
 def test_review_change_revises_report(practice):
-    from local_app.data import review_session, regenerate_report
+    from server.app.data import review_session, regenerate_report
+
     initial = report(practice)
     review_session(practice, "game", "Staff identified mislabeled game")
     revised = regenerate_report(practice)
@@ -102,7 +113,13 @@ def test_baseline_excludes_future_current_games_and_unreviewed(seed):
         (5, "2026-10-06", True, "practice", 1800),
         (6, "2026-10-07", True, "practice", 99999),
     ]:
-        seed.session(id, date, reviewed=reviewed, classification=classification, expected_players=1)
+        seed.session(
+            id,
+            date,
+            reviewed=reviewed,
+            classification=classification,
+            expected_players=1,
+        )
         seed.stats(id, 11, minutes=60, mechanical_load=load)
     baseline = rows_by_id(report(5))[11]["baseline"]
     assert baseline["sample_count"] == 2
@@ -112,8 +129,18 @@ def test_baseline_excludes_future_current_games_and_unreviewed(seed):
 
 def test_future_same_day_practice_cannot_enter_baseline(seed):
     seed.player(11, "Alex Rivera")
-    seed.session(1, start="2026-10-06T12:00:00+00:00", end="2026-10-06T13:00:00+00:00", expected_players=1)
-    seed.session(2, start="2026-10-06T19:00:00+00:00", end="2026-10-06T20:00:00+00:00", expected_players=1)
+    seed.session(
+        1,
+        start="2026-10-06T12:00:00+00:00",
+        end="2026-10-06T13:00:00+00:00",
+        expected_players=1,
+    )
+    seed.session(
+        2,
+        start="2026-10-06T19:00:00+00:00",
+        end="2026-10-06T20:00:00+00:00",
+        expected_players=1,
+    )
     seed.stats(1, 11, mechanical_load=600)
     seed.stats(2, 11, mechanical_load=99999)
     assert rows_by_id(report(1))[11]["baseline"]["sample_count"] == 0
@@ -139,15 +166,21 @@ def test_baseline_requires_matching_exposure_definition(seed):
 
 def test_valid_three_practice_baseline_uses_observed_intensities(seed):
     seed.player(11, "Alex Rivera")
-    for sid, day, minutes, load in [(1,"2026-10-01",30,300), (2,"2026-10-02",60,1200),
-                                   (3,"2026-10-03",60,1800), (4,"2026-10-06",60,2400)]:
+    for sid, day, minutes, load in [
+        (1, "2026-10-01", 30, 300),
+        (2, "2026-10-02", 60, 1200),
+        (3, "2026-10-03", 60, 1800),
+        (4, "2026-10-06", 60, 2400),
+    ]:
         seed.session(sid, day, expected_players=1)
         seed.stats(sid, 11, minutes=minutes, mechanical_load=load)
     baseline = rows_by_id(report(4))[11]["baseline"]
     assert baseline["sample_count"] == 3
     assert baseline["load_per_minute"] is not None
     assert baseline["load_per_minute"] == pytest.approx(22)
-    assert baseline["change_pct"] == pytest.approx((40 / baseline["load_per_minute"] - 1) * 100)
+    assert baseline["change_pct"] == pytest.approx(
+        (40 / baseline["load_per_minute"] - 1) * 100
+    )
 
 
 def test_unreviewed_report_has_explicit_verification_warning(seed):
@@ -169,16 +202,22 @@ def test_complete_flags_do_not_hide_participant_count_inconsistency(db, seed):
     seed.session(101, expected_players=2)
     seed.stats(101, 11)
     with db.database() as conn:
-        conn.execute("UPDATE sessions SET assignment_complete=1,sync_complete=1 WHERE id=101")
+        conn.execute(
+            "UPDATE sessions SET assignment_complete=TRUE,sync_complete=TRUE WHERE id=101"
+        )
         conn.execute("INSERT INTO assignments(session_id,player_id) VALUES(101,11)")
     assert report(101)["coverage"]["complete"] is False
 
 
 def test_source_reverting_to_old_value_still_has_monotonic_revision(practice, seed):
     first = report(practice)
-    seed.stats(practice, 11, minutes=60, mechanical_load=2400, distance_m=3000, jump_count=0)
+    seed.stats(
+        practice, 11, minutes=60, mechanical_load=2400, distance_m=3000, jump_count=0
+    )
     second = report(practice)
-    seed.stats(practice, 11, minutes=60, mechanical_load=1200, distance_m=3000, jump_count=0)
+    seed.stats(
+        practice, 11, minutes=60, mechanical_load=1200, distance_m=3000, jump_count=0
+    )
     third = report(practice)
     assert second["version"] > first["version"]
     assert third["version"] > second["version"]
@@ -188,22 +227,33 @@ def test_source_reverting_to_old_value_still_has_monotonic_revision(practice, se
 def test_updating_transport_timestamp_alone_does_not_revise(db, practice):
     first = report(practice)
     with db.database() as conn:
-        conn.execute("UPDATE sessions SET updated_at='2026-10-08T12:00:00Z' WHERE id=?", (practice,))
-        conn.execute("UPDATE stats SET updated_at='2026-10-08T12:00:00Z' WHERE session_id=?", (practice,))
+        conn.execute(
+            "UPDATE sessions SET updated_at='2026-10-08T12:00:00Z' WHERE id=%s",
+            (practice,),
+        )
+        conn.execute(
+            "UPDATE stats SET updated_at='2026-10-08T12:00:00Z' WHERE session_id=%s",
+            (practice,),
+        )
     assert report(practice)["version"] == first["version"]
 
 
-@pytest.mark.parametrize("start,end", [
-    ("2026-10-06T18:00:00Z", "2026-10-07T20:00:00Z"),
-    ("2026-10-06T18:00:00Z", "2026-10-06T17:00:00Z"),
-    ("2099-10-06T18:00:00Z", "2099-10-06T20:00:00Z"),
-])
+@pytest.mark.parametrize(
+    "start,end",
+    [
+        ("2026-10-06T18:00:00Z", "2026-10-07T20:00:00Z"),
+        ("2026-10-06T18:00:00Z", "2026-10-06T17:00:00Z"),
+        ("2099-10-06T18:00:00Z", "2099-10-06T20:00:00Z"),
+    ],
+)
 def test_invalid_or_future_recording_never_gets_complete_report(db, seed, start, end):
     seed.player(11, "Alex Rivera")
     seed.session(101, start=start, end=end, expected_players=1)
     seed.stats(101, 11)
     with db.database() as conn:
-        conn.execute("UPDATE sessions SET assignment_complete=1,sync_complete=1 WHERE id=101")
+        conn.execute(
+            "UPDATE sessions SET assignment_complete=TRUE,sync_complete=TRUE WHERE id=101"
+        )
         conn.execute("INSERT INTO assignments(session_id,player_id) VALUES(101,11)")
     result = report(101)
     assert result["coverage"]["complete"] is False
@@ -211,7 +261,9 @@ def test_invalid_or_future_recording_never_gets_complete_report(db, seed, start,
 
 
 @pytest.mark.parametrize("classification", ["game", "unknown"])
-def test_nonpractice_target_never_compares_against_practice_baseline(seed, classification):
+def test_nonpractice_target_never_compares_against_practice_baseline(
+    seed, classification
+):
     seed.player(11, "Alex Rivera")
     for sid, day in [(1, "2026-10-01"), (2, "2026-10-02"), (3, "2026-10-03")]:
         seed.session(sid, day, expected_players=1)
@@ -226,7 +278,12 @@ def test_nonpractice_target_never_compares_against_practice_baseline(seed, class
 
 def test_reclassifying_practice_as_game_removes_prior_comparison(db, seed):
     seed.player(11, "Alex Rivera")
-    for sid, day in [(1, "2026-10-01"), (2, "2026-10-02"), (3, "2026-10-03"), (4, "2026-10-06")]:
+    for sid, day in [
+        (1, "2026-10-01"),
+        (2, "2026-10-02"),
+        (3, "2026-10-03"),
+        (4, "2026-10-06"),
+    ]:
         seed.session(sid, day, expected_players=1)
         seed.stats(sid, 11, mechanical_load=600 if sid < 4 else 1200)
     original = report(4)
@@ -237,12 +294,28 @@ def test_reclassifying_practice_as_game_removes_prior_comparison(db, seed):
 
 
 @pytest.mark.parametrize("supplied_rate", [None, 999])
-def test_phase_intensity_is_recomputed_from_load_and_exposure(db, practice, supplied_rate):
-    import json
+def test_phase_intensity_is_recomputed_from_load_and_exposure(
+    db, practice, supplied_rate
+):
+    from pg_helpers import json_parameter
+
     with db.database() as conn:
-        conn.execute("INSERT INTO phases(id,session_id,title,valid) VALUES(201,?,'Synthetic drill',1)", (practice,))
-        conn.execute("INSERT INTO phase_stats(phase_id,player_id,metrics_json) VALUES(201,11,?)",
-                     (json.dumps({"minutes": 20, "mechanical_load": 250, "load_per_minute": supplied_rate,
-                                  "exposure_basis": "on_playing_field"}),))
+        conn.execute(
+            "INSERT INTO phases(id,session_id,title,valid) VALUES(201,%s,'Synthetic drill',TRUE)",
+            (practice,),
+        )
+        conn.execute(
+            "INSERT INTO phase_stats(phase_id,player_id,metrics_json) VALUES(201,11,%s)",
+            (
+                json_parameter(
+                    {
+                        "minutes": 20,
+                        "mechanical_load": 250,
+                        "load_per_minute": supplied_rate,
+                        "exposure_basis": "on_playing_field",
+                    }
+                ),
+            ),
+        )
     metrics = report(practice)["drills"][0]["players"][0]["metrics"]
     assert metrics["load_per_minute"] == 12.5

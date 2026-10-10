@@ -10,8 +10,8 @@ reports/*.json
 Dashboard/public/data/*.local.sqlite3*
 .local/
 .runtime/
-web/node_modules/
-web/dist/
+client/node_modules/
+client/dist/
 .pytest_cache/
 .coverage
 htmlcov/

@@ -14,6 +14,11 @@ x-runtime: &runtime
   security_opt:
     - no-new-privileges:true
   cap_drop: [ALL]
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
   environment: &environment
     PGHOST: db
     PGPORT: "5432"
@@ -30,7 +35,7 @@ x-runtime: &runtime
 
 services:
   db:
-    image: pgvector/pgvector:pg17
+    image: pgvector/pgvector:pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
     restart: unless-stopped
     environment:
       POSTGRES_DB: vipmbb
@@ -49,7 +54,7 @@ services:
   migrate:
     <<: *runtime
     restart: "no"
-    command: [python, -m, local_app.migrate]
+    command: [python, -m, server.app.migrate]
     depends_on:
       db:
         condition: service_healthy
@@ -69,10 +74,19 @@ services:
 
   worker:
     <<: *runtime
-    command: [python, -m, local_app.worker]
+    command: [python, -m, server.app.worker]
+    stop_grace_period: 30s
+    healthcheck:
+      test: [CMD, python, -c, "from server.app.worker import worker_status; assert worker_status()['running']"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     environment:
       <<: *environment
       KINEXON_ENV_FILE: /run/secrets/kinexon_env
+      KINEXON_BASE_URL: ${KINEXON_BASE_URL:-https://georgia-tech-mccamish.access.kinexon.com}
+      KINEXON_TEAM_ID: ${KINEXON_TEAM_ID:-3}
       VIPMBB_DISABLE_AUTO_SYNC: ${VIPMBB_DISABLE_AUTO_SYNC:-0}
     secrets:
       - postgres_password
@@ -85,7 +99,7 @@ services:
     <<: *runtime
     profiles: [tools]
     restart: "no"
-    command: [python, -m, local_app.import_sqlite, /legacy/practice.sqlite3]
+    command: [python, -m, server.app.import_sqlite, /legacy/practice.sqlite3]
     volumes:
       - app_state:/state
       - ./.local:/legacy:ro

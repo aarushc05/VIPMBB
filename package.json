@@ -7,9 +7,13 @@
     "dev:offline": "node scripts/dev.mjs --offline",
     "setup:models": "node scripts/setup-models.mjs",
     "dev:legacy": "node scripts/dev-legacy.mjs --offline",
-    "build": "npm --prefix web run build",
+    "build": "npm --prefix client run build",
     "test": "node scripts/check.mjs",
-    "sync": ".venv/bin/python -m local_app.sync"
+    "sync": "docker compose exec -T worker python -m server.app.sync",
+    "stop": "docker compose stop",
+    "logs": "docker compose logs --follow --tail 50 app worker",
+    "status": "docker compose ps",
+    "backup": "node scripts/backup.mjs"
   },
   "engines": {
     "node": ">=22.13.0"

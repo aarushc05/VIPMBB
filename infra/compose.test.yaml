@@ -12,7 +12,7 @@ services:
       db:
         condition: service_healthy
   db:
-    image: pgvector/pgvector:pg17
+    image: pgvector/pgvector:pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
     environment:
       POSTGRES_USER: vipmbb_test
       POSTGRES_PASSWORD: synthetic-test-only
