@@ -2164,21 +2164,17 @@ th small {
   margin: 20px 0;
 }
 
+/* Fade only: focus must not move a control between pointer-down and pointer-up. */
 /* Progressive enhancement: never hide content without the observer attached. */
 [data-reveal-state="pending"] {
   opacity: 0;
-  transform: translateY(18px);
 }
 [data-reveal-state="revealed"] {
   opacity: 1;
-  transform: none;
-  transition:
-    opacity 0.55s ease,
-    transform 0.55s cubic-bezier(0.2, 0.7, 0.2, 1);
+  transition: opacity 0.55s ease;
 }
 [data-reveal-state="visible"] {
   opacity: 1;
-  transform: none;
   transition: none;
 }
 
