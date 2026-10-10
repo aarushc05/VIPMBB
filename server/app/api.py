@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import chat, data, knowledge, models, sync, worker
+from . import chat, data, demo, knowledge, models, sync, worker
 
 
 class BoundedBody:
@@ -153,10 +153,15 @@ def _print_report(report):
         f"<li>{escape(r['created_at'])}: {escape(r['classification'])} — {escape(r['reason'])}</li>"
         for r in report["reviews"]
     )
+    synthetic_notice = (
+        "<p class='warning'><strong>SYNTHETIC DEMO — Invented players and measurements. Not Georgia Tech athlete data.</strong></p>"
+        if demo.status()["enabled"]
+        else ""
+    )
     return f"""<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Practice report {session["id"]}</title>
 <style>body{{font:14px system-ui;color:#142b3c;margin:32px}}h1{{font-size:28px}}h2{{margin-top:32px}}small{{display:block;font-weight:normal}}table{{border-collapse:collapse;font-size:11px;width:100%}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:right}}th:first-child{{text-align:left}}.wide{{overflow:auto}}.warning{{background:#fff7df;padding:16px}}a{{color:#003057}}@media print{{body{{margin:10mm;font-size:11px}}.screen{{display:none}}table{{font-size:8px}}td,th{{padding:4px}}@page{{size:landscape}}}}</style></head><body>
 <p class='screen'>Use your browser’s Print command to save this complete report as a PDF. <a href='/reports/{session["id"]}'>Back to report</a></p>
-<p>GEORGIA TECH · LOCAL PRACTICE INTELLIGENCE</p><h1>{escape(session["title"])}</h1><p>{escape(session["date"])} · {escape(session["classification"])} · {"reviewed" if session["reviewed"] else "unreviewed"} · {escape(session["status"])} · report v{report["version"]}</p>
+{synthetic_notice}<p>GEORGIA TECH · LOCAL PRACTICE INTELLIGENCE</p><h1>{escape(session["title"])}</h1><p>{escape(session["date"])} · {escape(session["classification"])} · {"reviewed" if session["reviewed"] else "unreviewed"} · {escape(session["status"])} · report v{report["version"]}</p>
 <p>Generated {escape(report["generated_at"])}. {report["coverage"]["recorded_players"]} recorded players / {escape(report["coverage"]["expected_players"] if report["coverage"]["expected_players"] is not None else "unknown")} assigned. Times below are UTC; session date is America/New_York.</p>
 <div class='warning'><strong>Coverage and interpretation</strong><ul>{warnings or "<li>No current report warnings.</li>"}</ul></div>
 <h2>Coaching observations</h2>{observations}<h2>All recorded players</h2>{table(report["players"])}
@@ -165,6 +170,8 @@ def _print_report(report):
 
 
 def create_app(local_ports=(8000, 8001)):
+    if demo.enabled():
+        local_ports = tuple(dict.fromkeys((*local_ports, 8002)))
     token = secrets.token_urlsafe(32)
 
     @asynccontextmanager
@@ -245,7 +252,7 @@ def create_app(local_ports=(8000, 8001)):
 
     @app.get("/api/bootstrap")
     def bootstrap():
-        return {"csrf_token": token}
+        return {"csrf_token": token, "demo": demo.status()}
 
     @app.get("/api/health")
     def health():
@@ -270,6 +277,7 @@ def create_app(local_ports=(8000, 8001)):
                 "The newest stored session is more than 30 days old. Recent empty dates do not imply zero activity."
             )
         return {
+            "demo": demo.status(),
             "today": chat.today().isoformat(),
             "timezone": "America/New_York",
             "data": stored,
@@ -315,6 +323,11 @@ def create_app(local_ports=(8000, 8001)):
 
     @app.post("/api/sync")
     def enqueue_sync(body: SyncRange):
+        if demo.status()["enabled"]:
+            raise HTTPException(
+                409,
+                "Live syncing is disabled in the isolated synthetic demo. Use the private local app for Kinexon data.",
+            )
         data.validate_range(body.start, body.end)
         if not worker.worker_status().get("credentials_configured", False):
             raise HTTPException(
@@ -354,6 +367,11 @@ def create_app(local_ports=(8000, 8001)):
 
     @app.post("/api/model/index")
     def index():
+        if demo.status()["enabled"]:
+            raise HTTPException(
+                409,
+                "The demo uses bounded queries and lexical retrieval without a model or background worker. Embedding rebuilds are available in the private local app.",
+            )
         return {"job": data.enqueue_job("index", {})}
 
     @app.post("/api/chat")

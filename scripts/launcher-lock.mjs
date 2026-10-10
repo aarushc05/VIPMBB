@@ -2,12 +2,13 @@ import { readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { root } from './runtime.mjs';
 
-export function acquireLauncher() {
-  const path = join(root, '.local', 'launcher.pid');
+export function acquireLauncher({ name = 'launcher' } = {}) {
+  if (!['launcher', 'demo-launcher'].includes(name)) throw new Error('Unknown launcher lock name.');
+  const path = join(root, '.local', `${name}.pid`);
   try {
     const original = statSync(path);
     const pid = Number(readFileSync(path, 'utf8').trim());
-    if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('The launcher lock is invalid. Inspect .local/launcher.pid before retrying.');
+    if (!Number.isSafeInteger(pid) || pid < 1) throw new Error(`The launcher lock is invalid. Inspect .local/${name}.pid before retrying.`);
     try {
       process.kill(pid, 0);
       throw new Error('A VIP-MBB launcher is already running. Use its terminal or stop it before starting another.');

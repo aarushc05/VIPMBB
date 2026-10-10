@@ -1,0 +1,83 @@
+# Deliberately standalone: never extends the private app or mounts its .env/cache.
+name: vipmbb-demo
+
+x-demo-runtime: &demo-runtime
+  image: vipmbb-demo-local
+  build:
+    context: .
+    dockerfile: infra/Dockerfile
+    target: runtime
+  init: true
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+  environment:
+    PGHOST: db
+    PGPORT: "5432"
+    PGDATABASE: vipmbb_demo
+    PGUSER: vipmbb_demo
+    # Non-sensitive synthetic-only database; no published database port.
+    PGPASSWORD: synthetic-demo-only
+    VIPMBB_DEMO: "1"
+    VIPMBB_DISABLE_AUTO_SYNC: "1"
+    VIPMBB_DISABLE_MODEL: "1"
+    VIPMBB_DATA_DIR: /state
+    KINEXON_ENV_FILE: /nonexistent-demo-credentials
+  volumes:
+    - demo_app_state:/state
+
+services:
+  db:
+    image: pgvector/pgvector:pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: vipmbb_demo
+      POSTGRES_USER: vipmbb_demo
+      POSTGRES_PASSWORD: synthetic-demo-only
+    volumes:
+      - demo_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U vipmbb_demo -d vipmbb_demo"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    <<: *demo-runtime
+    restart: "no"
+    command: [python, -m, server.app.migrate]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  seed:
+    <<: *demo-runtime
+    restart: "no"
+    command: [python, -m, server.app.demo]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  app:
+    <<: *demo-runtime
+    ports:
+      - "127.0.0.1:8002:8000"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  demo_postgres_data:
+  demo_app_state:

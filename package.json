@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "doctor": "node scripts/doctor.mjs",
+    "demo": "node scripts/demo.mjs",
+    "demo:stop": "docker compose --env-file .local/demo.environment -f compose.demo.yaml -p vipmbb-demo stop",
+    "demo:status": "docker compose --env-file .local/demo.environment -f compose.demo.yaml -p vipmbb-demo ps",
     "dev": "node scripts/dev.mjs",
     "dev:offline": "node scripts/dev.mjs --offline",
     "setup:models": "node scripts/setup-models.mjs",

@@ -2,6 +2,8 @@
 
 Local practice reports and a source-backed performance assistant for Georgia Tech men's basketball. PostgreSQL holds the authoritative measurements, assignments, reports, notes, and conversations. Docker runs the application and ingestion worker; Ollama runs natively on your Mac for Apple Silicon acceleration. No cloud AI or hosting account is required.
 
+**New to the project? Start with the fictional-data demo below.** You can explore reports, date ranges, classifications, and supported assistant queries without access to private team data. For development and pull requests, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Start on your laptop
 
 Tested on an Apple M4 Mac with 16 GB RAM. You need:
@@ -11,9 +13,30 @@ Tested on an Apple M4 Mac with 16 GB RAM. You need:
 - At least 8 GB of free disk space for images, model downloads, and your database, plus room for backups.
 - Authorized Kinexon access if you want to download or refresh team data.
 
+The Docker application is portable; the automatic native model installer currently supports Apple Silicon macOS only. Other platforms can use the model-free demo. Running the complete assistant elsewhere requires a separately configured local Ollama service and verification of Docker-to-host connectivity; it is not yet a tested one-command setup.
+
+### Try the demo—no credentials required
+
 ```sh
 git clone https://github.com/aarushc05/VIPMBB.git VIP-MBB
 cd VIP-MBB
+npm run doctor
+npm run demo
+```
+
+Open **http://127.0.0.1:8002**. All demo names and measurements are fictional. The demo uses a separate `vipmbb-demo` Docker project and database volumes; it does not read your Kinexon credentials, import your SQLite cache, contact Kinexon, or download AI models. Its assistant supports the application's bounded non-model questions rather than full language-model interpretation. Your real installation at port 8001 is independent.
+
+The demo includes eight fictional players and eight recordings: five practices, two games, and one unknown activity, including an intentionally incomplete practice to show coverage warnings. It is seeded once, with dates anchored to that first setup. Later starts preserve the snapshot and any demo reviews or notes instead of silently replacing them. As time passes, recent date filters can legitimately be empty; select **All history** to revisit the snapshot. Use `npm run demo:stop` or Ctrl+C to stop it without deleting demo data.
+
+First setup needs internet access to build Docker images. After that, `npm run demo -- --offline` reuses the already-built image. The demo has no ingestion worker, live sync, or model/embedding downloads.
+
+`npm run doctor` is read-only: it checks Node, Docker, file permissions, disk availability, and local application health. It does not read credential values, alter files, start services, or download anything. Missing credentials and a stopped application are normal before first setup; failed prerequisite checks need attention.
+
+### Connect authorized team data
+
+From the cloned repository:
+
+```sh
 cp -n .env.example .env
 chmod 600 .env
 open -e .env
@@ -58,6 +81,10 @@ This release runs **one database on your laptop**. Another person cloning and st
 
 | Command | Purpose |
 | --- | --- |
+| `npm run doctor` | Check local prerequisites without changing files or reading credentials |
+| `npm run demo` | Build/start a separate fictional-data walkthrough at port 8002 |
+| `npm run demo:stop` | Stop the demo without deleting its data |
+| `npm run demo:status` | Check the separate demo containers |
 | `npm run dev` | Build/update and start the complete local application |
 | `npm run dev:offline` | Start already-built images/models without auto-polling or downloads |
 | `npm run stop` | Stop containers without deleting data |
@@ -104,6 +131,8 @@ Current ingestion covers every discovered assigned player for the selected sessi
 | Exported backups / private secrets | `.local/`; ignored by Git and Docker builds |
 | Local models | `.runtime/`; ignored by Git and Docker builds |
 | Synthetic regression tests | `tests/` and `client/tests/` |
+| Setup/launcher regression tests | `scripts/tests/`; included in `npm test` |
+| Pull request checks | `.github/workflows/ci.yml`; same synthetic Docker test flow |
 | Previous prototype | `Dashboard/`, `Test/`, `LEGACY_README.md`; preserved, not the current runtime |
 
 The app and worker share one image. A one-shot migration service upgrades the schema before either starts. PostgreSQL-backed jobs have atomic deduplication, short transactional claims, renewable leases, bounded recovery, and ownership checks before source writes. A range ledger tracks completed, failed, and interrupted sync ranges instead of assuming that the latest end date proves continuous coverage. No Redis, Celery, Kubernetes, or separate vector service is needed.
@@ -124,6 +153,8 @@ Keep the original SQLite rollback copy until you have independently verified the
 
 `npm test` uses `infra/compose.test.yaml`, a separate `vipmbb_test` database, and per-test isolated schemas. Tests refuse a non-test database name. All fixtures are synthetic; no Kinexon request or athlete data is needed. The test database uses temporary storage and can be discarded safely. Do not run tests against production connection settings.
 
+The command also checks launcher behavior and builds/tests the React client. The same workflow runs in GitHub Actions for pull requests and changes to `main`, with no private repository secrets required. Run `npm run doctor` first when troubleshooting setup, and share only redacted diagnostics.
+
 | Symptom | Check |
 | --- | --- |
 | Docker unavailable | Open Docker Desktop and wait until its engine is running |
@@ -137,3 +168,9 @@ Keep the original SQLite rollback copy until you have independently verified the
 | Disk full | Export approved backups and inspect Docker storage; do not delete the PostgreSQL volume |
 
 The application is private by default, not encrypted by itself. Use FileVault and protect your backups. Other applications running as your macOS user, or users with Docker access, may access local data. Do not expose this single-user deployment through a public tunnel or change its bind address to share it.
+
+## Project status and contribution boundaries
+
+This is a student analysis project, not an official Georgia Tech product. Institutional names, colors, and marks remain their owners' property. Public source code does not authorize access to team records or redistribution of source data. A software license still needs to be selected by the repository owner before the project can claim to be generally licensed open-source software.
+
+Contributions should use the demo and synthetic tests. High-value next steps include coach-validated report definitions, more transparent source coverage and sync recovery, reviewed practice/game boundaries, and a regression question set for the assistant. Approved sharing, authentication, and backup operations should precede any hosted team deployment.
