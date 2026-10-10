@@ -1,0 +1,28 @@
+name: vipmbb-test
+services:
+  tests:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+      target: test
+    environment:
+      VIPMBB_TEST_DATABASE_URL: postgresql://vipmbb_test:synthetic-test-only@db:5432/vipmbb_test
+      VIPMBB_DISABLE_MODEL: "1"
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: vipmbb_test
+      POSTGRES_PASSWORD: synthetic-test-only
+      POSTGRES_DB: vipmbb_test
+    ports:
+      - "127.0.0.1:55433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U vipmbb_test -d vipmbb_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

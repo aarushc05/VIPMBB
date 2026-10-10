@@ -1,0 +1,104 @@
+name: vipmbb
+
+x-runtime: &runtime
+  image: vipmbb-local
+  build:
+    context: .
+    dockerfile: infra/Dockerfile
+    target: runtime
+  init: true
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  environment: &environment
+    PGHOST: db
+    PGPORT: "5432"
+    PGDATABASE: vipmbb
+    PGUSER: vipmbb
+    PGPASSWORD_FILE: /run/secrets/postgres_password
+    VIPMBB_DATA_DIR: /state
+    OLLAMA_URL: http://host.docker.internal:11434
+    VIPMBB_DOCKER_HOST_MODEL: "1"
+  secrets:
+    - postgres_password
+  volumes:
+    - app_state:/state
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: vipmbb
+      POSTGRES_USER: vipmbb
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U vipmbb -d vipmbb"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    <<: *runtime
+    restart: "no"
+    command: [python, -m, local_app.migrate]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  app:
+    <<: *runtime
+    ports:
+      - "127.0.0.1:8001:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    <<: *runtime
+    command: [python, -m, local_app.worker]
+    environment:
+      <<: *environment
+      KINEXON_ENV_FILE: /run/secrets/kinexon_env
+      VIPMBB_DISABLE_AUTO_SYNC: ${VIPMBB_DISABLE_AUTO_SYNC:-0}
+    secrets:
+      - postgres_password
+      - kinexon_env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  import:
+    <<: *runtime
+    profiles: [tools]
+    restart: "no"
+    command: [python, -m, local_app.import_sqlite, /legacy/practice.sqlite3]
+    volumes:
+      - app_state:/state
+      - ./.local:/legacy:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:
+  app_state:
+
+secrets:
+  postgres_password:
+    file: ./.local/secrets/postgres_password
+  kinexon_env:
+    file: ./.env

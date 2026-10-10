@@ -1,0 +1,27 @@
+# An allowlist prevents credentials, athlete data, models, and Git history
+# from ever entering the Docker build context.
+**
+!requirements.txt
+!local_app/
+!local_app/*.py
+!server/
+!server/**
+!web/
+!web/package.json
+!web/package-lock.json
+!web/index.html
+!web/vite.config.js
+!web/src/
+!web/src/**
+!web/tests/
+!web/tests/**
+!infra/
+!infra/Dockerfile
+!tests/
+!tests/*.py
+**/__pycache__/
+**/*.pyc
+**/.env*
+**/*.sqlite3*
+**/node_modules/
+**/dist/
