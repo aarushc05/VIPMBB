@@ -2,10 +2,39 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   activityLabel,
+  practiceComparisonExclusion,
   comparisonStatus,
   plotPoints,
   practicePoints,
 } from "../src/activity.js";
+
+test("whole-recording exclusions produce one clear reason without changing its activity label", () => {
+  const session = {
+    classification: "practice",
+    comparison_exclusion: "schedule_conflict",
+  };
+  assert.equal(activityLabel(session), "Practice");
+  assert.equal(
+    practiceComparisonExclusion(session),
+    "the recording overlaps a conservative scheduled-game window",
+  );
+  assert.equal(
+    practiceComparisonExclusion({ comparison_exclusion: "invalid_bounds" }),
+    "its recording times are missing, invalid or not yet complete",
+  );
+  assert.equal(
+    practiceComparisonExclusion({ comparison_exclusion: "future_rule" }),
+    "the recording is not eligible for a like-for-like practice comparison",
+  );
+  assert.equal(
+    practiceComparisonExclusion({ comparison_exclusion: null }),
+    null,
+  );
+  assert.equal(
+    practiceComparisonExclusion({ classification: "practice" }),
+    null,
+  );
+});
 
 test("activity badges use simple primary labels and prefer API descriptions", () => {
   assert.equal(

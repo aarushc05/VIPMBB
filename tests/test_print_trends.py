@@ -144,29 +144,51 @@ def test_print_tables_have_semantic_headers_and_bodies(client, printable_practic
         assert all(len(row) == len(table["thead"][0]) for row in table["tbody"])
 
 
-@pytest.mark.parametrize(
-    "exclusion,expected_reason",
-    [
-        ("legacy", "Legacy measurement"),
-        ("bounds", "Unusable recording times"),
-    ],
-)
-def test_excluded_comparison_keeps_actual_current_rate_visible(
-    client, db, seed, printable_practice, exclusion, expected_reason
+def test_individual_legacy_exclusion_keeps_actual_current_rate_in_trend_table(
+    client, seed, printable_practice
 ):
-    if exclusion == "legacy":
-        seed.stats(4, 11, minutes=60, mechanical_load=2400, legacy=True)
-    else:
-        with db.database() as connection:
-            connection.execute(
-                "UPDATE sessions SET end_utc='2026-10-07T01:00:00Z' WHERE id=4"
-            )
+    seed.stats(4, 11, minutes=60, mechanical_load=2400, legacy=True)
     _, markup = fetch_print(client, printable_practice)
     row = markup.trend_table()["tbody"][0]
-    assert expected_reason in row[0]
+    assert "Legacy measurement" in row[0]
     assert row[2] == "40.00"
     assert row[3:6] == ["—", "—", "0"]
     assert markup.svgs == []
+
+
+@pytest.mark.parametrize("exclusion", ["invalid_bounds", "schedule_conflict"])
+def test_whole_session_exclusion_has_one_explanation_and_only_raw_player_table(
+    client, db, printable_practice, exclusion
+):
+    with db.database() as connection:
+        if exclusion == "invalid_bounds":
+            connection.execute(
+                "UPDATE sessions SET end_utc='2026-10-07T01:00:00Z' WHERE id=4"
+            )
+        else:
+            identity = db.digest(
+                {
+                    "base_url": "https://georgia-tech-mccamish.access.kinexon.com",
+                    "team_id": 3,
+                }
+            )
+            connection.execute(
+                "INSERT INTO meta(key,value) VALUES('source_identity',%s)", (identity,)
+            )
+            connection.execute("""UPDATE sessions SET local_date='2026-03-04',
+                start_utc='2026-03-04T22:28:00Z',end_utc='2026-03-05T02:10:00Z' WHERE id=4""")
+    report = db.get_report(printable_practice)
+    assert report["session"]["classification"] == "practice"
+    assert report["session"]["comparison_exclusion"] == exclusion
+    text, markup = fetch_print(client, printable_practice)
+    explanation = "Practice trends are unavailable for this recording; see the coverage and interpretation notes above."
+    assert text.count(explanation) == 1
+    assert "Recent practice trends" not in text
+    assert "Prior average AU/min" not in text
+    assert len(markup.tables) == 1
+    assert "40.00" in markup.tables[0]["tbody"][0]
+    assert markup.svgs == []
+    assert markup.invalid_table_rows == []
 
 
 @pytest.mark.parametrize("classification", ["game", "unknown"])

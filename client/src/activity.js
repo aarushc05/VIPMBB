@@ -15,6 +15,24 @@ export function activityLabel(session = {}) {
     : "Unlabeled";
 }
 
+export function practiceComparisonExclusion(session = {}) {
+  if (session.comparison_exclusion == null) return null;
+  const reasons = {
+    schedule_conflict:
+      "the recording overlaps a conservative scheduled-game window",
+    source_conflict: "its source activity labels conflict",
+    invalid_bounds:
+      "its recording times are missing, invalid or not yet complete",
+    removed_upstream:
+      "the recording was not returned by the latest source sync",
+    not_practice: "the recording is not labeled as practice",
+  };
+  return (
+    reasons[session.comparison_exclusion] ||
+    "the recording is not eligible for a like-for-like practice comparison"
+  );
+}
+
 export function comparisonStatus(player = {}) {
   const baseline = player.baseline || {};
   const reasons = {

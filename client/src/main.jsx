@@ -62,7 +62,7 @@ import {
 import "./styles.css";
 import { attachMotion } from "./motion.js";
 import { PracticeHero, WorkflowLinks } from "./brand.jsx";
-import { activityLabel } from "./activity.js";
+import { activityLabel, practiceComparisonExclusion } from "./activity.js";
 import { PracticeTrends } from "./practice-trends.jsx";
 
 const NAV = [
@@ -911,6 +911,7 @@ function Report({ id, navigate, onChange }) {
       </>
     );
   const session = report.session || {};
+  const comparisonExclusion = practiceComparisonExclusion(session);
   const coverage = report.coverage || {};
   const summary = report.summary || {};
   const metrics = METRICS[group];
@@ -1324,7 +1325,18 @@ function Report({ id, navigate, onChange }) {
         </div>
       </Panel>
       {session.classification === "practice" ? (
-        <PracticeTrends key={id} report={report} />
+        comparisonExclusion ? (
+          <div className="inline-note activity-comparison-note">
+            <Info size={16} />
+            <p>
+              Practice trends unavailable for this recording —{" "}
+              {comparisonExclusion}. Recorded player measurements remain
+              available above.
+            </p>
+          </div>
+        ) : (
+          <PracticeTrends key={id} report={report} />
+        )
       ) : (
         <div className="inline-note activity-comparison-note">
           <Info size={16} />

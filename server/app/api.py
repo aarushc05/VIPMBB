@@ -199,7 +199,9 @@ def _print_report(report):
             f"<td>{delta}</td><td>{baseline['sample_count']}</td><td class='sample-dates'>{dates or '—'}</td></tr>"
         )
 
-    if session["classification"] == "practice":
+    if session["classification"] == "practice" and not session.get(
+        "comparison_exclusion"
+    ):
         baseline_section = (
             "<h2>Recent practice trends</h2><p>Current load/min compared with an exposure-weighted average "
             "of up to five earlier eligible practices within 90 days and the same July–June season. "
@@ -212,6 +214,8 @@ def _print_report(report):
             + "".join(trend_row(player) for player in report["players"])
             + "</tbody></table></div>"
         )
+    elif session["classification"] == "practice":
+        baseline_section = "<p>Practice trends are unavailable for this recording; see the coverage and interpretation notes above. Recorded player measurements remain available in the table above.</p>"
     else:
         baseline_section = "<p>Practice trends are not calculated for game, mixed or unlabeled recordings.</p>"
     review_log = "".join(
