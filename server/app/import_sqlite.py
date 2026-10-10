@@ -161,6 +161,33 @@ def _digest_rows(rows):
     return digest.hexdigest()
 
 
+def _latest_review_classifications(source):
+    available = {row[1] for row in source.execute('PRAGMA table_info("reviews")')}
+    if not set(TABLES["reviews"]) <= available:
+        raise ValueError("Source table reviews is missing required columns.")
+    # Match migration 0003: insertion identity, not possibly missing or equal
+    # timestamps, establishes the latest explicit staff decision.
+    return {
+        row["session_id"]: row["classification"]
+        for row in source.execute(
+            "SELECT session_id,classification FROM reviews ORDER BY id"
+        )
+    }
+
+
+def _activity_identity(row, latest_reviews):
+    """Apply derived activity policy without changing measurements or provenance."""
+    row = dict(row)
+    if row["id"] in latest_reviews:
+        row["classification"] = latest_reviews[row["id"]]
+        row["reviewed"] = True  # An explicit unknown decision is still a review.
+    elif not row["reviewed"]:
+        row["classification"] = data.source_classification(
+            row["source_labels"], row["start_utc"], row["end_utc"]
+        )
+    return row
+
+
 def _target_populated(target):
     return any(
         target.execute(
@@ -243,6 +270,7 @@ def import_snapshot(path, *, legacy_owner="local", if_empty=False):
                     "Target is not empty. Import refused without changing existing PostgreSQL data."
                 )
             counts, verification = {}, {}
+            latest_reviews = _latest_review_classifications(source)
             for table, columns in TABLES.items():
                 if table not in tables:
                     counts[table] = 0
@@ -263,6 +291,16 @@ def import_snapshot(path, *, legacy_owner="local", if_empty=False):
                         f'SELECT {quoted} FROM "{table}" ORDER BY {ordering}'
                     )
                 ]
+                source_hash = _digest_rows(rows)
+                derived_changes = 0
+                if table == "sessions":
+                    normalized = [
+                        _activity_identity(row, latest_reviews) for row in rows
+                    ]
+                    derived_changes = sum(
+                        before != after for before, after in zip(rows, normalized)
+                    )
+                    rows = normalized
                 for row in rows:
                     stored = dict(row)
                     if table == "reviews":
@@ -305,6 +343,16 @@ def import_snapshot(path, *, legacy_owner="local", if_empty=False):
                     "canonical_sha256": expected_hash,
                     "matched": True,
                 }
+                if table == "sessions":
+                    # Exact parity still applies to every other session field and
+                    # every measurement/audit table. Make this intentional derived
+                    # identity conversion visible rather than claiming raw parity.
+                    verification[table].update(
+                        source_canonical_sha256=source_hash,
+                        derived_fields=["classification", "reviewed"],
+                        derived_policy="0003_source_activity",
+                        derived_rows_changed=derived_changes,
+                    )
             # Rebuild vector values only from valid, already-tagged source embeddings.
             # Malformed/zero vectors remain preserved in embedding_json for audit,
             # but are absent from vector retrieval until a successful reindex.

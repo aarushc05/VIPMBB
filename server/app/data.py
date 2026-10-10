@@ -13,8 +13,8 @@ import re
 import subprocess
 from zoneinfo import ZoneInfo
 from .db import (
-    advisory_lock,
-    connect,
+    advisory_lock as advisory_lock,
+    connect as connect,
     database,
     jsonb,
     schema_name,
@@ -23,9 +23,6 @@ from .db import (
 
 ROOT = Path(__file__).resolve().parents[2]
 ATLANTA = ZoneInfo("America/New_York")
-HOME_GAME_DATES = frozenset(
-    "2025-11-03 2025-11-07 2025-11-10 2025-11-18 2025-11-23 2025-12-03 2025-12-06 2025-12-16 2025-12-20 2025-12-28 2026-01-03 2026-01-06 2026-01-14 2026-01-24 2026-01-31 2026-02-11 2026-02-18 2026-02-28 2026-03-04".split()
-)
 METRICS = (
     "minutes",
     "distance_m",
@@ -119,16 +116,69 @@ def labels(value):
 
 
 def source_classification(source_labels, start, end):
-    """A suggestion only. A schedule date or dubious bounds prevents auto-practice."""
-    begin, finish = timestamp(start), timestamp(end)
-    if not begin or not finish or not 0 < (finish - begin).total_seconds() <= 21600:
-        return "unknown"
+    """Activity identity follows source labels; measurement eligibility is separate."""
     source = {label.casefold() for label in labels(source_labels)}
-    if source & {"game", "match"}:
-        return "unknown"  # Unverified Match could be a scrimmage or mixed recording.
-    if begin.astimezone(ATLANTA).date().isoformat() in HOME_GAME_DATES:
+    practice = bool(source & {"practice", "training", "shootaround"})
+    game = bool(source & {"game", "match"})
+    if practice and game:
         return "unknown"
-    return "practice" if source & {"practice", "training", "shootaround"} else "unknown"
+    return "practice" if practice else "game" if game else "unknown"
+
+
+def gt_schedule_applies(connection):
+    """GT's public schedule must not affect another team or synthetic database."""
+    row = connection.execute(
+        "SELECT value FROM meta WHERE key='source_identity'"
+    ).fetchone()
+    return bool(
+        row
+        and row["value"]
+        == digest(
+            {
+                "base_url": "https://georgia-tech-mccamish.access.kinexon.com",
+                "team_id": 3,
+            }
+        )
+    )
+
+
+def practice_comparison_reason(session):
+    """Return a stable session-level exclusion code, independent of staff review."""
+    if session["classification"] != "practice":
+        return "not_practice"
+    if session.get("removed_upstream"):
+        return "removed_upstream"
+    begin, finish = (
+        timestamp(session.get("start_utc")),
+        timestamp(session.get("end_utc")),
+    )
+    if (
+        not begin
+        or not finish
+        or not 0 < (finish - begin).total_seconds() <= 21600
+        or finish > datetime.now(timezone.utc)
+    ):
+        return "invalid_bounds"
+    source = {label.casefold() for label in labels(session.get("source_labels", []))}
+    if not session.get("reviewed") and source & {"game", "match"}:
+        return "source_conflict"
+    if session.get("_apply_gt_schedule"):
+        from .schedule import overlaps_game_window
+
+        if overlaps_game_window(begin, finish):
+            return "schedule_conflict"
+    return None
+
+
+def activity_label(session):
+    if session["classification"] == "practice":
+        return "Practice"
+    if session["classification"] == "game":
+        return "Game" if session.get("reviewed") else "Game / scrimmage"
+    source = {label.casefold() for label in labels(session.get("source_labels", []))}
+    if source & {"practice", "training", "shootaround"} and source & {"game", "match"}:
+        return "Mixed recording"
+    return "Unlabeled"
 
 
 def initialize():
@@ -192,6 +242,9 @@ def session_dict(row):
         "start": item["start_utc"],
         "end": item["end_utc"],
         "classification": item["classification"],
+        "activity_label": activity_label(item),
+        "classification_origin": "manual" if item["reviewed"] else "source",
+        "comparison_exclusion": practice_comparison_reason(item),
         "reviewed": bool(item["reviewed"]),
         "status": item["status"],
         "source_labels": json_value(item["source_labels"]),
@@ -246,6 +299,7 @@ def list_sessions(
         )
     clause = " AND ".join(where)
     with database() as connection:
+        apply_schedule = gt_schedule_applies(connection)
         total = connection.execute(
             "SELECT COUNT(*) AS total FROM sessions s WHERE " + clause, params
         ).fetchone()["total"]
@@ -259,7 +313,9 @@ def list_sessions(
             [*params, limit, offset],
         ).fetchall()
     return {
-        "sessions": [session_dict(row) for row in rows],
+        "sessions": [
+            session_dict({**row, "_apply_gt_schedule": apply_schedule}) for row in rows
+        ],
         "total": total,
         "earliest": iso(bounds["earliest"]),
         "latest": iso(bounds["latest"]),
@@ -322,7 +378,7 @@ def review_session(session_id, classification, reason, actor_id="local"):
         )
         connection.execute(
             "UPDATE sessions SET classification=%s,reviewed=%s,updated_at=%s WHERE id=%s",
-            (classification, classification != "unknown", utcnow(), session_id),
+            (classification, True, utcnow(), session_id),
         )
     return get_report(session_id)
 

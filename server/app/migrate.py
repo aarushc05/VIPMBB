@@ -6,7 +6,7 @@ from alembic import command
 from alembic.config import Config
 from . import db
 
-HEAD = "0002_unknown_timestamps"
+HEAD = "0003_source_activity"
 
 
 def upgrade():

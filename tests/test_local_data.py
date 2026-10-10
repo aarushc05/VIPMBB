@@ -26,27 +26,41 @@ def test_atlanta_calendar_dates_respect_dst(db, utc, local):
     assert db.timestamp(utc).astimezone(db.ATLANTA).date().isoformat() == local
 
 
-def test_home_game_evening_training_is_not_auto_practice(db):
+def test_home_game_date_does_not_erase_training_source_classification(db):
     assert (
         db.source_classification(
             ["Training"], "2026-03-04T22:28:00Z", "2026-03-05T02:10:00Z"
         )
-        == "unknown"
+        == "practice"
     )
 
 
 @pytest.mark.parametrize(
-    "labels,start,end",
+    "labels,start,end,expected",
     [
-        (["Training", "Match"], "2026-03-03T18:00:00Z", "2026-03-03T20:00:00Z"),
-        (["Match"], "2026-03-03T18:00:00Z", "2026-03-03T20:00:00Z"),
-        (["Training"], "2026-03-03T18:00:00Z", "2026-03-04T20:00:00Z"),
-        (["Training"], "2026-03-03T18:00:00Z", None),
-        (["Training"], "2026-03-03T18:00:00Z", "2026-03-03T17:00:00Z"),
+        (
+            ["Training", "Match"],
+            "2026-03-03T18:00:00Z",
+            "2026-03-03T20:00:00Z",
+            "unknown",
+        ),
+        (["Match"], "2026-03-03T18:00:00Z", "2026-03-03T20:00:00Z", "game"),
+        (["Training"], "2026-03-03T18:00:00Z", "2026-03-04T20:00:00Z", "practice"),
+        (["Training"], "2026-03-03T18:00:00Z", None, "practice"),
+        (["Training"], "2026-03-03T18:00:00Z", "2026-03-03T17:00:00Z", "practice"),
+        (["Shootaround"], None, None, "practice"),
+        (["practice"], None, None, "practice"),
+        (["Game"], None, None, "game"),
+        (["Match", "Game"], None, None, "game"),
+        (["Practice", "Game"], None, None, "unknown"),
+        ([], None, None, "unknown"),
+        (["Unspecified"], None, None, "unknown"),
     ],
 )
-def test_ambiguous_or_invalid_recording_abstains(db, labels, start, end):
-    assert db.source_classification(labels, start, end) == "unknown"
+def test_source_labels_classify_activity_independently_of_recording_bounds(
+    db, labels, start, end, expected
+):
+    assert db.source_classification(labels, start, end) == expected
 
 
 def test_training_label_can_suggest_but_not_verify_practice(db):
@@ -113,3 +127,15 @@ def test_initialize_never_reclassifies_existing_reviewed_data(db, seed):
     assert rows[101]["reviewed"] is True
     assert rows[102]["classification"] == "unknown"
     assert rows[102]["reviewed"] is False
+
+
+def test_manual_unknown_is_a_persistent_override_not_a_removed_review(db, seed):
+    seed.session(101, classification="practice", reviewed=False, labels=["Training"])
+    db.review_session(101, "unknown", "Synthetic staff identified mixed activity")
+    db.initialize()
+    with db.database() as connection:
+        session = connection.execute(
+            "SELECT classification,reviewed FROM sessions WHERE id=101"
+        ).fetchone()
+    assert session["classification"] == "unknown"
+    assert session["reviewed"] is True

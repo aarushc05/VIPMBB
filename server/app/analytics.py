@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-import json
+from datetime import datetime, timedelta, timezone
+import math
 from . import data
 
-REPORT_RULES_VERSION = 1
+REPORT_RULES_VERSION = 2
 DEFINITIONS = [
     {
         "key": "minutes",
@@ -30,7 +30,7 @@ DEFINITIONS = [
         "key": "load_per_minute",
         "title": "Mechanical load per minute",
         "unit": "Kinexon units/min",
-        "body": "Mechanical load divided by positive exposure minutes. Comparisons require the same known exposure denominator; baseline is a minutes-weighted rate from up to five prior reviewed practices.",
+        "body": "Mechanical load divided by positive exposure minutes. Comparisons use the same known exposure denominator. The baseline is total load divided by total exposure from the latest three to five eligible earlier practices within 90 days and the same July-to-June season; a manual review is not required.",
     },
     {
         "key": "accel_load",
@@ -64,7 +64,7 @@ def _metrics(record):
     metrics = {key: data.finite(source.get(key)) for key in data.METRICS}
     metrics["exposure_basis"] = source.get("exposure_basis", "unknown")
     metrics["load_per_minute"] = (
-        metrics["mechanical_load"] / metrics["minutes"]
+        data.finite(metrics["mechanical_load"] / metrics["minutes"])
         if metrics["mechanical_load"] is not None
         and metrics["minutes"]
         and metrics["minutes"] > 0
@@ -73,55 +73,160 @@ def _metrics(record):
     return metrics
 
 
-def _baseline(connection, session, player_id, current):
-    if session["classification"] != "practice":
-        return {
-            "sample_count": 0,
-            "load_per_minute": None,
-            "change_pct": None,
-            "session_ids": [],
-            "method": "Practice-only comparison.",
-            "reason": "Recording is not classified as practice; a practice baseline is not applicable.",
-        }
-    basis = current.get("exposure_basis")
-    samples = []
-    if basis in ("on_playing_field", "session_duration"):
-        candidates = connection.execute(
-            """SELECT t.metrics_json,t.legacy,s.id,s.start_utc FROM stats t JOIN sessions s ON s.id=t.session_id WHERE t.player_id=%s AND s.start_utc<%s AND s.id<>%s AND s.classification='practice' AND s.reviewed AND NOT s.removed_upstream ORDER BY s.start_utc DESC,s.id DESC""",
-            (player_id, session["start_utc"], session["id"]),
-        ).fetchall()
-        for row in candidates:
-            metrics = _metrics(row)
-            if (
-                not row["legacy"]
-                and metrics["exposure_basis"] == basis
-                and metrics["load_per_minute"] is not None
-            ):
-                samples.append((row["id"], metrics))
-            if len(samples) == 5:
-                break
-    enough = len(samples) >= 3
-    rate = (
-        sum(metrics["mechanical_load"] for _, metrics in samples)
-        / sum(metrics["minutes"] for _, metrics in samples)
-        if enough
-        else None
-    )
-    change = (
-        (current["load_per_minute"] / rate - 1) * 100
-        if rate and current["load_per_minute"] is not None
-        else None
-    )
+LOOKBACK_DAYS = 90
+MIN_SAMPLES = 3
+MAX_SAMPLES = 5
+COMPARISON_METHOD = (
+    "Exposure-weighted rate (total load / total minutes) from up to five prior "
+    "eligible practices within 90 days and the same July-to-June season; "
+    "minimum three records with the same known exposure denominator."
+)
+COMPARISON_REASONS = {
+    "not_practice": "Recording is not classified as practice; a practice baseline is not applicable.",
+    "invalid_bounds": "Recording boundaries are missing, reversed, longer than six hours or not yet ended; practice comparison is unavailable.",
+    "removed_upstream": "The recording was absent from the latest successful source calendar response and is excluded from practice comparisons.",
+    "schedule_conflict": "The recording overlaps a conservative scheduled-game window. Activity may be mixed, so it is excluded from practice comparisons.",
+    "source_conflict": "Source activity labels conflict, so this recording is excluded from practice comparisons.",
+    "legacy_current": "This player's current record has legacy or unverified source provenance and is excluded from practice comparisons.",
+    "unknown_exposure_basis": "The current exposure denominator is unknown; practice rates require the same known exposure definition.",
+    "missing_current_measurements": "Current mechanical load and exposure minutes must both be available before comparing practice rates.",
+    "nonpositive_current_exposure": "Current exposure must be positive before a per-minute practice comparison can be calculated.",
+    "measurement_out_of_range": "Available values cannot produce a finite practice rate; comparison is unavailable.",
+    "zero_baseline": "The eligible prior-practice baseline is zero. Percentage change from zero is undefined and is not shown.",
+}
+
+
+def _point(session, metrics):
     return {
-        "sample_count": len(samples),
-        "load_per_minute": rate,
-        "change_pct": change,
-        "session_ids": [session_id for session_id, _ in samples],
-        "method": "Exposure-weighted rate from up to five prior reviewed practices; minimum three comparable records.",
-        "reason": None
-        if enough
-        else "At least three prior reviewed practices with the same known exposure denominator are required.",
+        "session_id": session["id"],
+        "date": data.iso(session["local_date"]),
+        "start": data.iso(session["start_utc"]),
+        "load_per_minute": metrics["load_per_minute"],
+        "minutes": metrics["minutes"],
+        "mechanical_load": metrics["mechanical_load"],
+        "reviewed": bool(session["reviewed"]),
     }
+
+
+def _baseline(connection, session, player_id, current, *, current_legacy=False):
+    result = {
+        "sample_count": 0,
+        "load_per_minute": None,
+        "change_pct": None,
+        "session_ids": [],
+        "method": COMPARISON_METHOD,
+        "reason": None,
+        "reason_code": None,
+        "history": [],
+        "current_point": None,
+        "lookback_days": LOOKBACK_DAYS,
+        "min_samples": MIN_SAMPLES,
+        "max_samples": MAX_SAMPLES,
+        "season_start": None,
+    }
+
+    def unavailable(code):
+        result["reason_code"] = code
+        result["reason"] = COMPARISON_REASONS.get(
+            code, "This recording is not eligible for a practice comparison."
+        )
+        return result
+
+    problem = data.practice_comparison_reason(session)
+    if problem:
+        return unavailable(problem)
+    if (
+        current_legacy
+        or (data.json_value(session["source_json"]) or {}).get("import") == "legacy"
+    ):
+        return unavailable("legacy_current")
+    basis = current.get("exposure_basis")
+    if basis not in ("on_playing_field", "session_duration"):
+        return unavailable("unknown_exposure_basis")
+    load, minutes = (
+        data.finite(current.get("mechanical_load")),
+        data.finite(current.get("minutes")),
+    )
+    if load is None or minutes is None:
+        return unavailable("missing_current_measurements")
+    if minutes <= 0:
+        return unavailable("nonpositive_current_exposure")
+    current_rate = data.finite(load / minutes)
+    if current_rate is None:
+        return unavailable("measurement_out_of_range")
+    current = {
+        **current,
+        "mechanical_load": load,
+        "minutes": minutes,
+        "load_per_minute": current_rate,
+    }
+
+    begin = data.timestamp(session["start_utc"])
+    local_begin = begin.astimezone(data.ATLANTA)
+    season_year = local_begin.year if local_begin.month >= 7 else local_begin.year - 1
+    season_start = datetime(season_year, 7, 1, tzinfo=data.ATLANTA)
+    cutoff = max(begin - timedelta(days=LOOKBACK_DAYS), season_start)
+    result["season_start"] = season_start.date().isoformat()
+    result["current_point"] = _point(session, current)
+    candidates = connection.execute(
+        """SELECT s.*,t.metrics_json,t.legacy AS player_legacy
+        FROM stats t JOIN sessions s ON s.id=t.session_id
+        WHERE t.player_id=%s AND s.id<>%s AND s.classification='practice'
+          AND s.start_utc>=%s AND s.start_utc<%s AND s.end_utc<=%s
+          AND NOT s.removed_upstream
+        ORDER BY s.start_utc DESC,s.id DESC""",
+        (player_id, session["id"], cutoff, begin, begin),
+    ).fetchall()
+    samples = []
+    for candidate in candidates:
+        candidate["_apply_gt_schedule"] = session.get("_apply_gt_schedule", False)
+        if (
+            candidate["player_legacy"]
+            or (data.json_value(candidate["source_json"]) or {}).get("import")
+            == "legacy"
+            or data.practice_comparison_reason(candidate)
+        ):
+            continue
+        metrics = _metrics(candidate)
+        if (
+            metrics["exposure_basis"] != basis
+            or metrics["load_per_minute"] is None
+            or metrics["minutes"] is None
+            or metrics["minutes"] <= 0
+        ):
+            continue
+        samples.append((candidate, metrics))
+        if len(samples) == MAX_SAMPLES:
+            break
+    result["sample_count"] = len(samples)
+    # Preserve the existing newest-first IDs while exposing chronological chart points.
+    result["session_ids"] = [candidate["id"] for candidate, _ in samples]
+    result["history"] = [
+        _point(candidate, metrics) for candidate, metrics in reversed(samples)
+    ]
+    if len(samples) < MIN_SAMPLES:
+        result["reason_code"] = "insufficient_history"
+        result["reason"] = (
+            f"{len(samples)} of {MIN_SAMPLES} required earlier eligible practices found "
+            f"within {LOOKBACK_DAYS} days and the same season with the same known exposure denominator."
+        )
+        return result
+    try:
+        total_load = math.fsum(metrics["mechanical_load"] for _, metrics in samples)
+        total_minutes = math.fsum(metrics["minutes"] for _, metrics in samples)
+        rate = data.finite(total_load / total_minutes)
+    except (OverflowError, ZeroDivisionError):
+        rate = None
+    if rate is None:
+        return unavailable("measurement_out_of_range")
+    result["load_per_minute"] = rate
+    if rate == 0:
+        return unavailable("zero_baseline")
+    change = (current_rate / rate - 1) * 100
+    if not math.isfinite(change):
+        return unavailable("measurement_out_of_range")
+    result["change_pct"] = change
+    return result
 
 
 def _known_sum(players, key):
@@ -155,6 +260,7 @@ def _build_report(session_id, job=None):
         ).fetchone()
         if not session:
             raise KeyError("Session not found.")
+        session["_apply_gt_schedule"] = data.gt_schedule_applies(connection)
         rows = connection.execute(
             'SELECT t.*,p.name,p.number FROM stats t JOIN players p ON p.id=t.player_id WHERE t.session_id=%s ORDER BY p.name COLLATE "C",p.id',
             (session_id,),
@@ -184,7 +290,11 @@ def _build_report(session_id, job=None):
                     "number": row["number"],
                     "metrics": metrics,
                     "baseline": _baseline(
-                        connection, session, row["player_id"], metrics
+                        connection,
+                        session,
+                        row["player_id"],
+                        metrics,
+                        current_legacy=bool(row["legacy"]),
                     ),
                     "missing_metrics": [
                         key for key in data.METRICS if metrics[key] is None
@@ -235,10 +345,6 @@ def _build_report(session_id, job=None):
             )
         )
         warnings = []
-        if not session["reviewed"]:
-            warnings.append(
-                "Activity type has not been reviewed. Source labels are suggestions, not proof of practice or competition."
-            )
         if session["removed_upstream"]:
             warnings.append(
                 "This recording was absent from the latest successful source calendar response and is retained for audit only."
@@ -255,13 +361,9 @@ def _build_report(session_id, job=None):
             warnings.append(
                 f"{len(inconsistent_exposure)} player record(s) have positive distance or load but zero reported exposure. Their per-minute rates are unavailable; off-court activity or source timing may explain this and must be reviewed."
             )
-        if (
-            data.iso(session["local_date"]) in data.HOME_GAME_DATES
-            and not session["reviewed"]
-        ):
-            warnings.append(
-                "This date appears on the verified 2025–26 home-game schedule. Review activity type before treating this recording as practice."
-            )
+        comparison_problem = data.practice_comparison_reason(session)
+        if comparison_problem in {"schedule_conflict", "source_conflict"}:
+            warnings.append(COMPARISON_REASONS[comparison_problem])
         if not valid_bounds:
             warnings.append(
                 "Recording boundaries are missing, reversed, longer than six hours or not yet ended. Review timing before comparing workloads."
@@ -341,22 +443,35 @@ def _build_report(session_id, job=None):
             observations.append(
                 {
                     "title": "Individual comparison",
-                    "body": f"{changed['name']}'s load per minute was {changed['baseline']['change_pct']:+.1f}% relative to {changed['baseline']['sample_count']} prior reviewed practices with comparable exposure measurement. This describes movement load, not fatigue or basketball performance.",
+                    "body": f"{changed['name']}'s load per minute was {changed['baseline']['change_pct']:+.1f}% relative to {changed['baseline']['sample_count']} prior eligible practices within 90 days in the same season with comparable exposure measurement. The current record covers {changed['metrics']['minutes']:.1f} exposure minutes; short or partial participation can differ substantially from a full practice. This describes recorded movement load, not fatigue or basketball performance.",
                 }
             )
         else:
-            if session["classification"] != "practice":
+            if comparison_problem:
                 observations.append(
                     {
                         "title": "Practice comparison not applicable",
-                        "body": "This recording is not classified as practice, so it has not been compared with practice baselines. Game, unknown and practice activity are kept separate.",
+                        "body": COMPARISON_REASONS.get(
+                            comparison_problem,
+                            "This recording is not eligible for practice comparison.",
+                        ),
+                    }
+                )
+            elif any(
+                player["baseline"]["reason_code"] == "zero_baseline"
+                for player in players
+            ):
+                observations.append(
+                    {
+                        "title": "Percentage comparison unavailable",
+                        "body": "An eligible prior-practice baseline is zero, so percentage change is undefined. The observed history is shown without inventing a percentage.",
                     }
                 )
             else:
                 observations.append(
                     {
                         "title": "Baseline not yet established",
-                        "body": "No player has a usable three-practice reviewed baseline with a known, matching exposure denominator. No trend or fatigue inference has been generated.",
+                        "body": "No player has a usable three-practice comparison within 90 days in the same season with a matching known exposure denominator. Individual rows explain what is missing.",
                     }
                 )
         coverage = {
@@ -365,7 +480,7 @@ def _build_report(session_id, job=None):
             "complete": complete,
             "missing_player_ids": missing_ids,
             "notes": [
-                "A classification review confirms activity type only; it does not certify data completeness.",
+                "Activity classification does not certify data completeness.",
                 "Player coverage is based on source assignments when successfully retrieved.",
             ],
         }
@@ -391,6 +506,24 @@ def _build_report(session_id, job=None):
             "definitions": DEFINITIONS,
             "reviews": [data.public_value(dict(row)) for row in reviews],
             "rules_version": REPORT_RULES_VERSION,
+            "comparison": {
+                "eligible_players": sum(
+                    player["baseline"]["current_point"] is not None
+                    for player in players
+                ),
+                "players_with_history": sum(
+                    bool(player["baseline"]["history"]) for player in players
+                ),
+                "players_with_baseline": sum(
+                    player["baseline"]["load_per_minute"] is not None
+                    for player in players
+                ),
+                "players_with_percentage": len(comparable),
+                "lookback_days": LOOKBACK_DAYS,
+                "min_samples": MIN_SAMPLES,
+                "max_samples": MAX_SAMPLES,
+                "method": COMPARISON_METHOD,
+            },
         }
         # updated_at is transport metadata, not measurement content; repeated identical
         # imports must not create spurious report versions.

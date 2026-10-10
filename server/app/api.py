@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import chat, data, demo, knowledge, models, sync, worker
+from . import chat, data, demo, knowledge, models, worker
 
 
 class BoundedBody:
@@ -105,7 +105,9 @@ def _local_origin(value, ports=(8000, 8001)):
 
 
 def _print_report(report):
-    escape = lambda value: html.escape(str(value), quote=True)
+    def escape(value):
+        return html.escape(str(value), quote=True)
+
     session = report["session"]
 
     def number(value):
@@ -145,10 +147,73 @@ def _print_report(report):
         + table(d.get("players", []))
         for d in report["drills"]
     )
-    baselines = "".join(
-        f"<tr><th>{escape(p['name'])}</th><td>{p['baseline']['sample_count']}</td><td>{number(p['baseline']['load_per_minute'])}</td><td>{number(p['baseline']['change_pct'])}</td><td>{escape(p['baseline'].get('reason') or p['baseline']['method'])}</td></tr>"
-        for p in report["players"]
-    )
+
+    def trend_row(player):
+        baseline = player["baseline"]
+        history = baseline.get("history", [])
+        current = baseline.get("current_point")
+        points = history + ([current] if current else [])
+        chart = "—"
+        if points:
+            rates = [point["load_per_minute"] for point in points]
+            lower, upper = min(rates), max(rates)
+            coordinates = [
+                (
+                    8 + i * 104 / max(1, len(points) - 1),
+                    30 - (rate - lower) * 24 / (upper - lower or 1),
+                )
+                for i, rate in enumerate(rates)
+            ]
+            trace = " ".join(f"{x:.1f},{y:.1f}" for x, y in coordinates)
+            description = "; ".join(
+                f"{point['date']}: {point['load_per_minute']:.2f}" for point in points
+            )
+            dots = "".join(
+                f"<circle cx='{x:.1f}' cy='{y:.1f}' r='2.5'/>" for x, y in coordinates
+            )
+            chart = f"<svg width='120' height='38' viewBox='0 0 120 38' role='img' aria-label='{escape(description)}'><title>{escape(description)}</title><polyline points='{trace}' fill='none' stroke='#715523' stroke-width='2'/><g fill='#051e39'>{dots}</g></svg>"
+        change = baseline.get("change_pct")
+        delta = f"{change:+.1f}%" if change is not None else "—"
+        reasons = {
+            "insufficient_history": f"{baseline['sample_count']} of 3 practices available",
+            "missing_current_measurements": "Current measurement missing",
+            "nonpositive_current_exposure": "No positive current exposure",
+            "unknown_exposure_basis": "Unknown exposure definition",
+            "legacy_current": "Legacy measurement",
+            "invalid_bounds": "Unusable recording times",
+            "schedule_conflict": "Game-window overlap",
+            "source_conflict": "Mixed source activity",
+            "removed_upstream": "Removed source recording",
+            "zero_baseline": "Prior average is zero; % undefined",
+        }
+        code = baseline.get("reason_code")
+        note = reasons.get(code, baseline.get("reason") or "")
+        dates = "<br>".join(
+            f"<a href='/reports/{point['session_id']}'>{escape(point['date'])}</a>: {number(point['load_per_minute'])}"
+            for point in history
+        )
+        return (
+            f"<tr><th>{escape(player['name'])}<small>{escape(note)}</small></th>"
+            f"<td>{chart}</td><td>{number(player['metrics'].get('load_per_minute'))}</td>"
+            f"<td>{number(baseline['load_per_minute']) if baseline['load_per_minute'] is not None else '—'}</td>"
+            f"<td>{delta}</td><td>{baseline['sample_count']}</td><td class='sample-dates'>{dates or '—'}</td></tr>"
+        )
+
+    if session["classification"] == "practice":
+        baseline_section = (
+            "<h2>Recent practice trends</h2><p>Current load/min compared with an exposure-weighted average "
+            "of up to five earlier eligible practices within 90 days and the same July–June season. "
+            "Three prior records with the same exposure definition are required for a percentage comparison. "
+            "Source-labeled practices are included; manual review is not required. "
+            "Mini charts show chronological recorded practices, not equal calendar intervals; each uses its own scale. "
+            "Changes describe recorded workload, not fatigue or readiness.</p>"
+            "<div class='wide'><table><thead><tr><th>Player</th><th>Recorded practice trend</th><th>Current AU/min</th>"
+            "<th>Prior average AU/min</th><th>Change</th><th>Prior practices</th><th>Prior date: AU/min</th></tr></thead><tbody>"
+            + "".join(trend_row(player) for player in report["players"])
+            + "</tbody></table></div>"
+        )
+    else:
+        baseline_section = "<p>Practice trends are not calculated for game, mixed or unlabeled recordings.</p>"
     review_log = "".join(
         f"<li>{escape(r['created_at'])}: {escape(r['classification'])} — {escape(r['reason'])}</li>"
         for r in report["reviews"]
@@ -159,14 +224,14 @@ def _print_report(report):
         else ""
     )
     return f"""<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Practice report {session["id"]}</title>
-<style>body{{font:14px system-ui;color:#142b3c;margin:32px}}h1{{font-size:28px}}h2{{margin-top:32px}}small{{display:block;font-weight:normal}}table{{border-collapse:collapse;font-size:11px;width:100%}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:right}}th:first-child{{text-align:left}}.wide{{overflow:auto}}.warning{{background:#fff7df;padding:16px}}a{{color:#003057}}@media print{{body{{margin:10mm;font-size:11px}}.screen{{display:none}}table{{font-size:8px}}td,th{{padding:4px}}@page{{size:landscape}}}}</style></head><body>
+<style>body{{font:14px system-ui;color:#142b3c;margin:32px}}h1{{font-size:28px}}h2{{margin-top:32px}}small{{display:block;font-weight:normal}}table{{border-collapse:collapse;font-size:11px;width:100%}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:right}}th:first-child{{text-align:left}}.sample-dates{{white-space:nowrap;line-height:1.6}}tr{{break-inside:avoid}}thead{{display:table-header-group}}.wide{{overflow:auto}}.warning{{background:#fff7df;padding:16px}}a{{color:#003057}}@media print{{body{{margin:10mm;font-size:11px}}.screen{{display:none}}table{{font-size:8px}}td,th{{padding:4px}}@page{{size:landscape}}}}</style></head><body>
 <p class='screen'>Use your browser’s Print command to save this complete report as a PDF. <a href='/reports/{session["id"]}'>Back to report</a></p>
-{synthetic_notice}<p>GEORGIA TECH · LOCAL PRACTICE INTELLIGENCE</p><h1>{escape(session["title"])}</h1><p>{escape(session["date"])} · {escape(session["classification"])} · {"reviewed" if session["reviewed"] else "unreviewed"} · {escape(session["status"])} · report v{report["version"]}</p>
+{synthetic_notice}<p>GEORGIA TECH · LOCAL PRACTICE INTELLIGENCE</p><h1>{escape(session["title"])}</h1><p>{escape(session["date"])} · {escape(session.get("activity_label", session["classification"]))} · {escape(session["status"])} · report v{report["version"]}</p>
 <p>Generated {escape(report["generated_at"])}. {report["coverage"]["recorded_players"]} recorded players / {escape(report["coverage"]["expected_players"] if report["coverage"]["expected_players"] is not None else "unknown")} assigned. Times below are UTC; session date is America/New_York.</p>
 <div class='warning'><strong>Coverage and interpretation</strong><ul>{warnings or "<li>No current report warnings.</li>"}</ul></div>
 <h2>Coaching observations</h2>{observations}<h2>All recorded players</h2>{table(report["players"])}
-<h2>Individual baselines</h2><table><tr><th>Player</th><th>Prior practices</th><th>Load/min baseline</th><th>Change %</th><th>Method / limitation</th></tr>{baselines}</table>
-<h2>Phases</h2>{drills or "<p>No phase statistics available.</p>"}<h2>Definitions</h2>{definitions}<h2>Classification audit</h2><ul>{review_log or "<li>Not yet reviewed.</li>"}</ul></body></html>"""
+{baseline_section}
+<h2>Phases</h2>{drills or "<p>No phase statistics available.</p>"}<h2>Definitions</h2>{definitions}{"<h2>Classification corrections</h2><ul>" + review_log + "</ul>" if review_log else ""}</body></html>"""
 
 
 def create_app(local_ports=(8000, 8001)):

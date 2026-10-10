@@ -103,12 +103,14 @@ def test_review_change_revises_report(practice):
     assert revised["session"]["classification"] == "game"
 
 
-def test_baseline_excludes_future_current_games_and_unreviewed(seed):
+def test_baseline_includes_unreviewed_practice_but_excludes_future_current_and_games(
+    seed,
+):
     seed.player(11, "Alex Rivera")
     for id, date, reviewed, classification, load in [
         (1, "2026-10-01", True, "practice", 600),
         (2, "2026-10-02", True, "practice", 1200),
-        (3, "2026-10-03", False, "practice", 99999),
+        (3, "2026-10-03", False, "practice", 1800),
         (4, "2026-10-04", True, "game", 99999),
         (5, "2026-10-06", True, "practice", 1800),
         (6, "2026-10-07", True, "practice", 99999),
@@ -122,9 +124,9 @@ def test_baseline_excludes_future_current_games_and_unreviewed(seed):
         )
         seed.stats(id, 11, minutes=60, mechanical_load=load)
     baseline = rows_by_id(report(5))[11]["baseline"]
-    assert baseline["sample_count"] == 2
-    assert baseline["load_per_minute"] is None
-    assert baseline["change_pct"] is None
+    assert baseline["sample_count"] == 3
+    assert baseline["load_per_minute"] == pytest.approx(20)
+    assert baseline["change_pct"] == pytest.approx(50)
 
 
 def test_future_same_day_practice_cannot_enter_baseline(seed):
@@ -183,9 +185,15 @@ def test_valid_three_practice_baseline_uses_observed_intensities(seed):
     )
 
 
-def test_unreviewed_report_has_explicit_verification_warning(seed):
+def test_mixed_source_report_keeps_explicit_uncertainty_warning(seed):
     seed.player(11, "Alex Rivera")
-    seed.session(101, classification="unknown", reviewed=False, expected_players=1)
+    seed.session(
+        101,
+        classification="unknown",
+        reviewed=False,
+        expected_players=1,
+        labels=["Training", "Match"],
+    )
     seed.stats(101, 11)
     result = report(101)
     assert result["session"]["reviewed"] is False or result["session"]["reviewed"] == 0

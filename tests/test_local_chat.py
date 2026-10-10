@@ -173,6 +173,141 @@ def test_unreviewed_selected_session_is_disclosed(seed):
     assert any("not classified" in warning for warning in result["warnings"])
 
 
+@pytest.mark.parametrize("explicit", [False, True])
+def test_clean_source_practice_needs_no_manual_review(seed, explicit):
+    seed.player(11, "Alex Rivera")
+    seed.session(101, reviewed=False, expected_players=1)
+    seed.stats(101, 11, distance_m=321)
+    result = ask("Show distance", 101 if explicit else None)
+    assert values(result) == {11: 321}
+    assert not any("unreviewed" in warning.lower() for warning in result["warnings"])
+
+
+def test_last_n_applies_after_practice_eligibility_and_ignores_selected_context(
+    db, seed
+):
+    seed.player(11, "Alex Rivera")
+    for sid in (1, 2, 3):
+        seed.session(sid, f"2026-10-0{sid}", reviewed=False, expected_players=1)
+        seed.stats(sid, 11, mechanical_load=100 * sid)
+    seed.session(
+        4,
+        "2026-10-04",
+        start="2026-10-04T08:00:00Z",
+        end="2026-10-04T16:00:00Z",
+        reviewed=False,
+    )
+    seed.session(5, "2026-10-05", labels=["Training", "Game"], reviewed=False)
+    seed.session(6, "2026-10-06", classification="unknown", reviewed=False)
+    seed.session(7, "2026-10-06", classification="game", labels=["Game"])
+    seed.session(8, "2026-10-06")
+    with db.database() as conn:
+        conn.execute("UPDATE sessions SET removed_upstream=TRUE WHERE id=8")
+    for sid in range(4, 9):
+        seed.stats(sid, 11, mechanical_load=99999)
+    result = ask("Show mechanical load in the last three practices", 8)
+    assert result["query"]["last_n"] == 3
+    assert [source["id"] for source in result["sources"]] == [3, 2, 1]
+    assert {row["session_id"]: row["value"] for row in result["table"]["rows"]} == {
+        1: 100,
+        2: 200,
+        3: 300,
+    }
+
+
+def test_date_query_excludes_invalid_recording_without_substituting_older_practice(seed):
+    seed.player(11, "Alex Rivera")
+    seed.session(1, "2026-10-05")
+    seed.stats(1, 11, distance_m=100)
+    seed.session(
+        2,
+        "2026-10-06",
+        start="2026-10-06T08:00:00Z",
+        end="2026-10-06T16:00:00Z",
+        reviewed=False,
+    )
+    seed.stats(2, 11, distance_m=99999)
+    result = ask("Show distance on 2026-10-06", 1)
+    assert not result["sources"]
+    assert "not zero" in result["answer"]
+    assert "not substituted older dates" in result["answer"]
+
+
+@pytest.mark.parametrize("gt_source", [False, True])
+def test_schedule_window_filter_is_source_scoped_and_explicit_record_stays_readable(
+    db, seed, gt_source
+):
+    seed.player(11, "Alex Rivera")
+    seed.session(
+        1,
+        "2026-03-04",
+        start="2026-03-04T13:00:00Z",
+        end="2026-03-04T15:00:00Z",
+        reviewed=False,
+    )
+    seed.session(
+        2,
+        "2026-03-04",
+        start="2026-03-04T23:45:00Z",
+        end="2026-03-05T02:00:00Z",
+        reviewed=False,
+    )
+    seed.stats(1, 11, distance_m=100)
+    seed.stats(2, 11, distance_m=999)
+    with db.database() as conn:
+        conn.execute(
+            "INSERT INTO meta(key,value) VALUES('source_identity',%s)",
+            (
+                db.digest({
+                    "base_url": "https://georgia-tech-mccamish.access.kinexon.com",
+                    "team_id": 3 if gt_source else 99,
+                }),
+            ),
+        )
+    latest = ask("Show distance")
+    ranged = ask("Show distance on 2026-03-04")
+    explicit = ask("Show distance", 2)
+    assert values(latest) == {11: 100 if gt_source else 999}
+    assert values(ranged) == {11: 100 if gt_source else 1099}
+    assert {s["id"] for s in latest["sources"]} == {1 if gt_source else 2}
+    assert values(explicit) == {11: 999}
+    assert any("scheduled-game window" in w for w in explicit["warnings"]) == gt_source
+
+
+@pytest.mark.parametrize(
+    "exclusion,warning_fragment",
+    [
+        ("invalid_bounds", "Recording boundaries"),
+        ("source_conflict", "Source activity labels conflict"),
+        ("removed_upstream", "absent from the latest successful source calendar"),
+        ("not_practice", "not classified as practice"),
+    ],
+)
+def test_explicit_excluded_recording_keeps_raw_measurements_with_reason(
+    db, seed, exclusion, warning_fragment
+):
+    seed.player(11, "Alex Rivera")
+    seed.session(101, reviewed=False, expected_players=1)
+    seed.stats(101, 11, distance_m=456)
+    with db.database() as conn:
+        if exclusion == "invalid_bounds":
+            conn.execute("UPDATE sessions SET end_utc=start_utc WHERE id=101")
+        elif exclusion == "source_conflict":
+            conn.execute(
+                "UPDATE sessions SET source_labels=%s WHERE id=101",
+                (db.jsonb(["Training", "Game"]),),
+            )
+        elif exclusion == "removed_upstream":
+            conn.execute("UPDATE sessions SET removed_upstream=TRUE WHERE id=101")
+        else:
+            conn.execute("UPDATE sessions SET classification='game' WHERE id=101")
+    explicit = ask("Show distance", 101)
+    implicit = ask("Show distance")
+    assert values(explicit) == {11: 456}
+    assert any(warning_fragment in w for w in explicit["warnings"])
+    assert not implicit["sources"]
+
+
 def test_definition_retrieval_has_document_citations(db):
     result = ask("What does mechanical load mean?")
     assert result["sources"]

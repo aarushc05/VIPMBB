@@ -28,12 +28,12 @@ SEEDS = [
     (
         "Practice classification",
         "method",
-        "Source labels such as Training or Match do not establish verified activity type. Scheduled home-game dates and implausible boundaries require review. Reviewing a session confirms its activity type only, not completeness, sensor quality or competitive interval boundaries. Unreviewed practices must be identified as provisional.",
+        "Training, Practice and Shootaround source labels identify practices. Game or Match alone identifies game/scrimmage activity; mixed practice/game labels stay mixed. Manual corrections are preserved. Activity identity is separate from measurement quality. A practice label does not establish complete coverage or comparable drill content. GT's official 2022–26 tipoff snapshot excludes game-overlapping intervals from practice comparisons, not entire game dates. Its 30-minute-before / three-hour-after window is a conservative guard, not a measured game duration; uncovered seasons are not schedule-validated.",
     ),
     (
         "Personal baselines",
         "method",
-        "The report compares load per minute with a player's previous reviewed practices where exposure denominators match and measurements are available. It excludes the current and future sessions. A small sample is descriptive, not a diagnosis. Similar drill mix and coaching context still matter.",
+        "The report compares current load per minute with an exposure-weighted average (sum of load / sum of minutes) from up to five prior eligible practices within 90 days and the same July-to-June season. Source-labeled practices qualify without manual review. At least three prior records, known matching exposure definitions, valid ended recording boundaries and usable individual measurements are required. Games, mixed activity, game-window overlap, future/overlapping recordings and legacy-unknown measurements are excluded. Missing teammates do not disqualify a usable individual record. A zero prior average cannot define percentage change. Charts show exact recorded practices and source dates, not a continuous daily trend. Similar drill mix and coaching context still matter; changes do not diagnose fatigue or readiness.",
     ),
     (
         "Missing data and coverage",

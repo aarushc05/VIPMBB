@@ -1,6 +1,7 @@
 """Read-only SQLite migration, PostgreSQL parity and recoverable backups."""
 
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
@@ -120,6 +121,108 @@ def test_if_empty_still_imports_valid_source_when_postgres_empty(db, tmp_path):
     source = create_snapshot(tmp_path / "synthetic.sqlite3")
     assert import_snapshot(source, if_empty=True)["status"] == "imported"
     assert db.status_data()["sessions"] == 1
+
+
+def test_fresh_import_applies_source_policy_and_preserves_all_other_values(
+    db, tmp_path
+):
+    from server.app import import_sqlite
+
+    source = create_snapshot(tmp_path / "old-activity-policy.sqlite3")
+    with sqlite3.connect(source) as connection:
+        connection.row_factory = sqlite3.Row
+        base = dict(
+            connection.execute("SELECT * FROM sessions WHERE id=101").fetchone()
+        )
+        connection.execute("DELETE FROM reviews")
+        cases = [
+            (101, "unknown", False, ["Training"]),
+            (102, "unknown", False, ["Match"]),
+            (103, "practice", False, ["Training", "Match"]),
+            (104, "game", True, ["Training"]),
+            (105, "unknown", False, ["Training"]),
+            (106, "practice", True, ["Match"]),
+            (107, "practice", False, []),
+            (108, "unknown", False, ["SHOOTAROUND"]),
+        ]
+        for sid, classification, reviewed, labels in cases:
+            row = {
+                **base,
+                "id": sid,
+                "classification": classification,
+                "reviewed": int(reviewed),
+                "source_labels": json.dumps(labels),
+            }
+            columns = ",".join(row)
+            placeholders = ",".join("?" for _ in row)
+            connection.execute(
+                f"INSERT OR REPLACE INTO sessions({columns}) VALUES({placeholders})",
+                tuple(row.values()),
+            )
+        connection.execute(
+            "INSERT INTO reviews VALUES(2,105,'game','Earlier synthetic decision','2026-10-06T20:00:00+00:00')"
+        )
+        connection.execute(
+            "INSERT INTO reviews VALUES(3,105,'unknown','Latest synthetic decision remains unresolved','2026-10-06T20:00:00+00:00')"
+        )
+        # Label identity does not depend on a questionable recording duration.
+        connection.execute(
+            "UPDATE sessions SET end_utc='2026-10-07T08:30:00+00:00' WHERE id=101"
+        )
+    before = source.read_bytes()
+    result = import_sqlite.import_snapshot(source)
+    assert source.read_bytes() == before
+    with db.database() as connection:
+        rows = {r["id"]: r for r in connection.execute("SELECT * FROM sessions")}
+    expected = {
+        101: ("practice", False),
+        102: ("game", False),
+        103: ("unknown", False),
+        104: ("game", True),
+        105: ("unknown", True),
+        106: ("practice", True),
+        107: ("unknown", False),
+        108: ("practice", False),
+    }
+    assert {
+        sid: (row["classification"], row["reviewed"]) for sid, row in rows.items()
+    } == expected
+    with (
+        sqlite3.connect(f"file:{source}?mode=ro", uri=True) as original,
+        db.database() as target,
+    ):
+        original.row_factory = sqlite3.Row
+        for table, columns in import_sqlite.TABLES.items():
+            order = import_sqlite.KEYS.get(table, ("id",))
+            selected = ",".join(columns)
+            ordering = ",".join(order)
+            old = [
+                import_sqlite._normalized(row)
+                for row in original.execute(
+                    f"SELECT {selected} FROM {table} ORDER BY {ordering}"
+                )
+            ]
+            new = target.execute(
+                sql.SQL("SELECT {} FROM {} ORDER BY {}").format(
+                    sql.SQL(",").join(map(sql.Identifier, columns)),
+                    sql.Identifier(table),
+                    sql.SQL(",").join(map(sql.Identifier, order)),
+                )
+            ).fetchall()
+            if table == "sessions":
+                for row in old + new:
+                    row.pop("classification")
+                    row.pop("reviewed")
+            assert old == new, f"Non-derived values changed in {table}"
+    audit = result["verification"]["sessions"]
+    assert audit["derived_fields"] == ["classification", "reviewed"]
+    assert audit["derived_policy"] == "0003_source_activity"
+    assert audit["derived_rows_changed"] == 6
+    assert audit["source_canonical_sha256"] != audit["canonical_sha256"]
+    assert audit["matched"] is True
+    repeated = import_sqlite.import_snapshot(source)
+    assert repeated["status"] == "already-imported"
+    assert repeated["verification"] == result["verification"]
 
 
 def test_old_dashboard_schema_requires_authoritative_snapshot(db, tmp_path):

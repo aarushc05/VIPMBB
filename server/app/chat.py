@@ -8,7 +8,7 @@ import json
 import re
 import uuid
 
-from . import data, knowledge, models
+from . import analytics, data, knowledge, models
 
 SPECS = {
     "minutes": ("Tracked exposure", "min"),
@@ -460,15 +460,19 @@ def _plan(message, players, history):
 
 
 def _select_sessions(plan, session_id):
+    selected_recording = (
+        session_id is not None
+        and not plan["start"]
+        and not plan["end"]
+        and plan["last_n"] == 1
+    )
     with data.database() as conn:
-        if (
-            session_id is not None
-            and not plan["start"]
-            and not plan["end"]
-            and plan["last_n"] == 1
-        ):
+        apply_gt_schedule = data.gt_schedule_applies(conn)
+        if selected_recording:
+            # An explicit recording stays readable even when its provenance or
+            # timing excludes it from implicit practice aggregates.
             rows = conn.execute(
-                "SELECT * FROM sessions WHERE id=%s AND NOT removed_upstream",
+                "SELECT * FROM sessions WHERE id=%s",
                 (session_id,),
             ).fetchall()
         else:
@@ -490,11 +494,21 @@ def _select_sessions(plan, session_id):
                 + " AND ".join(clauses)
                 + " ORDER BY s.start_utc DESC,s.id DESC"
             )
-            if not plan["start"] and not plan["end"]:
-                sql += " LIMIT %s"
-                values.append(plan["last_n"])
             rows = conn.execute(sql, values).fetchall()
-    return [data.public_value(dict(r)) for r in rows]
+    sessions = []
+    for row in rows:
+        session = dict(row)
+        session["_apply_gt_schedule"] = apply_gt_schedule
+        reason = data.practice_comparison_reason(session)
+        if selected_recording or reason is None:
+            session.pop("_apply_gt_schedule")
+            session["comparison_exclusion"] = reason
+            sessions.append(data.public_value(session))
+    # A newer excluded recording must not consume a requested practice slot.
+    # Date-range queries never substitute eligible sessions outside that range.
+    if not selected_recording and not plan["start"] and not plan["end"]:
+        sessions = sessions[: plan["last_n"]]
+    return sessions
 
 
 def _aggregate(records, metric):
@@ -773,7 +787,7 @@ def answer(message, session_id=None, conversation_id=None):
                     else " in the current local store"
                 )
                 result["answer"] = (
-                    f"No matching practice data{span}. This is missing coverage, not zero workload. I have not substituted older dates."
+                    f"No eligible matching practice data{span}. Missing or excluded recordings are not zero workload. I have not substituted older dates."
                 )
             else:
                 result["sources"] = [
@@ -785,14 +799,13 @@ def answer(message, session_id=None, conversation_id=None):
                     }
                     for s in sessions
                 ]
-                if any(not s["reviewed"] for s in sessions):
-                    result["warnings"].append(
-                        "Includes unreviewed practice candidates; source labels are not verified activity types."
-                    )
-                if any(s["classification"] != "practice" for s in sessions):
-                    result["warnings"].append(
-                        "The selected recording is not classified as a practice. These are recording totals, not verified practice or competitive-game totals."
-                    )
+                for session in sessions:
+                    reason = session["comparison_exclusion"]
+                    if reason:
+                        result["warnings"].append(
+                            "Showing the selected recording's available measurements only. "
+                            + analytics.COMPARISON_REASONS[reason]
+                        )
                 if any(
                     not s["sync_complete"] or not s["assignment_complete"]
                     for s in sessions
